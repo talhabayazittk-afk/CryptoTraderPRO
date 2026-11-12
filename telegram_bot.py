@@ -13,7 +13,7 @@ Features:
   7. Position Sizing & Risk Calculator (/kasa ONDO 1000) with 1-tap capital buttons ($500 / $1000 / $2500 / $5000)
   8. Personal Price Alarms (/alarm ONDO 0.3620 or 1-tap Resistance/Support alarm buttons)
   9. 24/7 Proactive Breakout, Whale & Squeeze Radar + Automatic Session Bulletins (09:00 & 16:30)
-  10. Single-instance PID lock & Authorized Chat ID security
+  10. Single-instance PID lock & Open access for all users and groups
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
@@ -88,6 +88,8 @@ def _log(msg: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass
+
+
 DEFAULT_WATCHLIST = [
     "BTC/USDT",
     "ETH/USDT",
@@ -143,12 +145,6 @@ def _compute_full_coin_bundle(
     allow_synthetic_fallback: bool = False,
     force_refresh: bool = False,
 ) -> Tuple[pd.DataFrame, MarketForecast, Dict[str, MarketForecast], Dict[str, float], float]:
-    """
-    Fetches all 4 timeframes (15m, 1h, 4h, 1d) + OrderFlowIntel IN PARALLEL,
-    evaluates from 1D -> 15M so HTF alignment is accurate, caches the 4-timeframe bundle
-    for 45 seconds so button switches are instantaneous, and returns:
-      (df_active, fc_active, tf_forecasts, mtf_scores, current_price)
-    """
     tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
     tf_key = tf.upper()
     sym_key = symbol.upper()
@@ -166,7 +162,6 @@ def _compute_full_coin_bundle(
     )
     fetcher = CryptoDataFetcher(cfg.exchange)
 
-    # Fetch 4 timeframes AND OrderFlowIntel concurrently
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_tf = ex.submit(
             fetcher.fetch_multi_timeframe_parallel,
@@ -219,7 +214,6 @@ def _analyze_single_coin(
     timeframe: str = "1h",
     force_refresh: bool = False,
 ) -> Tuple[str, Dict[str, Any], pd.DataFrame, MarketForecast, float]:
-    """Returns (html_text, inline_keyboard, df_active, fc_active, current_price)."""
     tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
     tf_key = tf.upper()
     df_active, fc_active, _, mtf_scores, current_price = _compute_full_coin_bundle(
@@ -244,7 +238,6 @@ def _analyze_single_coin_for_scan(
     btc_df: Optional[pd.DataFrame] = None,
     btc_score: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Worker function for parallel multi-coin scanning."""
     try:
         cfg = AnalysisConfig(exchange=ExchangeConfig(symbol=sym, timeframe=tf, limit=200))
         fetcher = CryptoDataFetcher(cfg.exchange)
@@ -314,11 +307,6 @@ def _scan_watchlist_parallel(
     only_high_quality: bool = False,
     force_refresh: bool = False,
 ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    Scans up to 10 watchlist coins IN PARALLEL using ThreadPoolExecutor,
-    incorporating BTC macro context, caches raw results for 45s so filter/market
-    switches are instant, and returns (html_text, inline_keyboard, raw_results).
-    """
     tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
     now_t = time.time()
     results: Optional[List[Dict[str, Any]]] = None
@@ -332,7 +320,6 @@ def _scan_watchlist_parallel(
     if results is None:
         symbols_to_scan = list(dict.fromkeys(_load_shared_watchlist() + DEFAULT_WATCHLIST))[:10]
 
-        # Fetch BTC reference first for relative strength & macro regime
         btc_df_ref: Optional[pd.DataFrame] = None
         btc_score_ref: Optional[float] = None
         try:
@@ -430,17 +417,17 @@ def _build_help_html(chat_id: str) -> str:
     return (
         "👋 <b>Akıllı Kripto Karar-Destek &amp; Vadeli Radar Terminali (v8.0)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Artık yazı yazmanıza gerek kalmadan <b>ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
+        "Botumuz **herkese açık** olarak çalışmaktadır! <b>Ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
         "⚡ <b>Vadeli İşlemler (Futures) Kurulum &amp; Güven Radarı:</b>\n"
-        "• <code>/vadeli ONDO 1h</code> — Destek/Direnç, R:R ve Güven Notuna (0-100) Göre Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı (Riskliyse İşlem Önermez!)\n"
-        "• <code>/vadelitara 1h</code> — Tüm Coinleri Tarar, Sadece Güvenli Vadeli Kurulumları ve Riskli/Reddedilenleri Ayırır\n\n"
+        "• <code>/vadeli ONDO 1h</code> — Destek/Direnç, R:R ve Güven Notuna (0-100) Göre Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı\n"
+        "• <code>/vadelitara 1h</code> — Tüm Coinleri Tarar, Sadece Güvenli Vadeli Kurulumları Listeler\n\n"
         "📲 <b>Temel Sorgu &amp; Grafik Komutları:</b>\n"
         "• <code>ONDO</code> veya <code>ONDO 4h</code> — 4 Kartlı Detaylı Analiz + Dokunmatik Butonlar\n"
         "• <code>/grafik ONDO 1h</code> — Destek, Direnç, Mıknatıs ve Hedef Çizgili Grafik Görseli\n"
         "• <code>/miknatis ONDO</code> — 15M/1H/4H/1D Mıknatıs (POC) &amp; Likidasyon Haritası\n"
         "• <code>/kasa ONDO 1000</code> — Stop Mesafesine Göre Kasa &amp; Risk Hesaplayıcı\n\n"
         "🚀 <b>Tarama &amp; Küresel Piyasa Komutları:</b>\n"
-        "• <code>/tara 1h</code> — İzleme Listesini Paralel Tarar (Butonlu Seçim)\n"
+        "• <code>/tara 1h</code> — İzleme Listesini Paralel Tarar\n"
         "• <code>/firsat 1h</code> — Sadece Güçlü Kurulum &amp; Balina Fırsatlarını Filtreler\n"
         "• <code>/piyasa</code> veya <code>/nakit</code> — Küresel Para Giriş/Çıkışı &amp; Seans Özeti\n\n"
         "⏰ <b>Alarm, Radar &amp; Liste Yönetimi:</b>\n"
@@ -449,15 +436,14 @@ def _build_help_html(chat_id: str) -> str:
         "• <code>/liste</code> — Tıklanabilir Coin Seçim Menüsü\n"
         "• <code>/ekle PEPE</code> | <code>/cikar PEPE</code> — İzleme Listesini Düzenler\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>Yetkili Chat ID:</b> <code>{chat_id}</code>"
+        f"🌐 <b>Durum:</b> Herkese Açık &amp; Sınırsız Kullanım"
     )
 
 
 # ===========================================================================
-# PROACTIVE BACKGROUND CHECKS (PRICE ALARMS, SMART RADAR & SESSION BULLETINS)
+# PROACTIVE BACKGROUND CHECKS
 # ===========================================================================
 def _check_price_alarms(bot_token: str, chat_id: str) -> None:
-    """Checks user price alarms every 30s and fires instant Telegram notifications when crossed."""
     state = load_telegram_state()
     alarms = state.get("alarms", [])
     if not alarms or not chat_id:
@@ -517,13 +503,6 @@ def _check_price_alarms(bot_token: str, chat_id: str) -> None:
 
 
 def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False) -> int:
-    """
-    Scans watchlist in parallel and alerts on high-conviction events:
-      - Readiness >= 4/5 with recent structure breakout/sweep
-      - Strong Whale Accumulation (>= 70/100) or Distribution (<= 30/100)
-      - High Volatility Squeeze (>= 80%)
-    Respects a 2-hour per-coin cooldown unless force=True.
-    """
     state = load_telegram_state()
     if not force and not state.get("radar_enabled", True):
         return 0
@@ -539,7 +518,7 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
         sym = r["symbol"]
         fc: MarketForecast = r["fc"]
         last_sent = float(cooldowns.get(sym, 0.0))
-        if not force and (now_ts - last_sent) < 7200:  # 2 hours cooldown per coin
+        if not force and (now_ts - last_sent) < 7200:
             continue
 
         reasons: List[str] = []
@@ -583,7 +562,6 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
 
 
 def _check_auto_session_bulletin(bot_token: str, chat_id: str) -> None:
-    """Sends automatic market & cash flow summary at 09:00 and 16:30 local time if enabled."""
     state = load_telegram_state()
     if not state.get("auto_session_summary", True) or not chat_id:
         return
@@ -625,7 +603,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
     parts = data.split(":")
     action = parts[0]
 
-    # 1. Single-Coin Analysis, Timeframe Switch or Explicit Refresh: an:SYMBOL:TF or an_ref:SYMBOL:TF
     if action in ("an", "an_ref") and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -653,7 +630,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_text, reply_markup=kb)
 
-    # 2. Send PNG Chart Snapshot: chart:SYMBOL:TF
     elif action == "chart" and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -674,7 +650,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, "❌ Grafik görseli oluşturulamadı.", reply_markup=kb)
 
-    # 3. Magnet (POC) & Liquidation Map: liq:SYMBOL:TF
     elif action == "liq" and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -688,7 +663,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_liq, reply_markup=kb)
 
-    # 4. Position Sizing & Risk Plan: kasa:SYMBOL:TF[:CAPITAL]
     elif action == "kasa" and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -703,7 +677,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_kasa, reply_markup=kb)
 
-    # 5. Quick 1-Tap Resistance / Support Price Alarm Setup: al_res:SYMBOL:TF or al_sup:SYMBOL:TF
     elif action in ("al_res", "al_sup") and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -733,7 +706,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             reply_markup=build_alarm_radar_inline_keyboard(st_a),
         )
 
-    # 6. Delete or Clear Alarms: al_del:ID or al_clear:all
     elif action == "al_del" and len(parts) >= 2:
         aid = parts[1]
         remove_price_alarm(aid)
@@ -754,7 +726,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         if not edit_telegram_message(bot_token, chat_id, msg_id, html_al, reply_markup=kb_al):
             send_telegram_message(bot_token, chat_id, html_al, reply_markup=kb_al)
 
-    # 7. Radar Toggles & Manual Scan: radar:toggle | radar:session_toggle | radar:scan_now
     elif action == "radar" and len(parts) >= 2:
         sub = parts[1]
         state = load_telegram_state()
@@ -784,7 +755,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         if not edit_telegram_message(bot_token, chat_id, msg_id, html_al, reply_markup=kb_al):
             send_telegram_message(bot_token, chat_id, html_al, reply_markup=kb_al)
 
-    # 8. Coin Picker Menu: coins:TF
     elif action == "coins":
         tf = parts[1] if len(parts) >= 2 else "1H"
         answer_callback_query(bot_token, cq_id, f"🪙 Coin Seçim Menüsü ({tf})")
@@ -802,7 +772,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_c, reply_markup=kb_c)
 
-    # 9. Parallel Multi-Coin Screener: scan:TF:ONLY_HQ
     elif action == "scan":
         tf = parts[1] if len(parts) >= 2 else "1H"
         only_hq = (parts[2] == "1") if len(parts) >= 3 else False
@@ -824,7 +793,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, scan_html, reply_markup=kb_s)
 
-    # 10. Global Market & Cash Flow Overview: market:TF
     elif action == "market":
         tf = parts[1] if len(parts) >= 2 else "1H"
         answer_callback_query(bot_token, cq_id, "🌍 Küresel piyasa & nakit akışı açılıyor...")
@@ -849,7 +817,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             else:
                 send_telegram_message(bot_token, chat_id, html_m, reply_markup=kb_m)
 
-    # 11. Dedicated Perpetual Futures (Vadeli İşlemler) Setup & Confidence Report: fut:SYMBOL:TF or fut_ref:SYMBOL:TF
     elif action in ("fut", "fut_ref") and len(parts) >= 3:
         sym = parts[1]
         tf = parts[2]
@@ -878,7 +845,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_fut, reply_markup=kb_fut)
 
-    # 12. Multi-Coin Perpetual Futures Radar Scan: fut_scan:TF
     elif action == "fut_scan":
         tf = parts[1] if len(parts) >= 2 else "1H"
         answer_callback_query(bot_token, cq_id, f"📡 [{tf}] Vadeli İşlem Radarı taranıyor...")
@@ -905,10 +871,6 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 
 
 def _map_reply_keyboard_text(raw_text: str) -> str:
-    """
-    Maps persistent bottom Reply Keyboard button texts to slash commands reliably,
-    even if mobile Telegram clients alter emoji variation selectors.
-    """
     t = raw_text.strip()
     t_low = t.lower()
     if "coin seç" in t_low or "coin listesi" in t_low or t.startswith("🪙"):
@@ -1205,10 +1167,9 @@ def _safe_callback_worker(bot_token: str, cq: Dict[str, Any], cq_chat_id: str) -
 
 
 # ===========================================================================
-# MAIN 24/7 POLLING & PROACTIVE RADAR LOOP
+# MAIN 24/7 POLLING & PROACTIVE RADAR LOOP (OPEN TO ALL)
 # ===========================================================================
 def run_polling_bot(bot_token: str) -> None:
-    # Ensure no older duplicate instance is polling at the same time
     running, old_pid = is_bot_running()
     if running and old_pid and old_pid != os.getpid():
         try:
@@ -1227,7 +1188,7 @@ def run_polling_bot(bot_token: str) -> None:
     except Exception:
         pass
 
-    _log(f"🤖 Akıllı Kripto İnteraktif Telegram Botu & Radar Başlatıldı (PID: {os.getpid()})!")
+    _log(f"🤖 Herkese Açık Akıllı Kripto İnteraktif Telegram Botu & Radar Başlatıldı (PID: {os.getpid()})!")
     offset = 0
     last_alarm_check = 0.0
     last_radar_check = time.time()
@@ -1237,22 +1198,19 @@ def run_polling_bot(bot_token: str) -> None:
         try:
             now_t = time.time()
             saved_cfg = load_telegram_config()
-            auth_chat_id = saved_cfg.get("chat_id", "").strip()
+            target_chat_id = saved_cfg.get("chat_id", "").strip()
 
-            # 1. Background Price Alarm Check (every 30s) — dispatched to worker pool so getUpdates never blocks
-            if auth_chat_id and (now_t - last_alarm_check) >= 30.0:
+            if target_chat_id and (now_t - last_alarm_check) >= 30.0:
                 last_alarm_check = now_t
-                worker_pool.submit(_check_price_alarms, bot_token, auth_chat_id)
-                worker_pool.submit(_check_auto_session_bulletin, bot_token, auth_chat_id)
+                worker_pool.submit(_check_price_alarms, bot_token, target_chat_id)
+                worker_pool.submit(_check_auto_session_bulletin, bot_token, target_chat_id)
 
-            # 2. Background 24/7 Smart Breakout/Whale/Squeeze Radar (every 10 min) — dispatched to worker pool
             state_curr = load_telegram_state()
             radar_int = float(state_curr.get("radar_interval_sec", 600))
-            if auth_chat_id and state_curr.get("radar_enabled", True) and (now_t - last_radar_check) >= radar_int:
+            if target_chat_id and state_curr.get("radar_enabled", True) and (now_t - last_radar_check) >= radar_int:
                 last_radar_check = now_t
-                worker_pool.submit(_run_proactive_radar_cycle, bot_token, auth_chat_id, False)
+                worker_pool.submit(_run_proactive_radar_cycle, bot_token, target_chat_id, False)
 
-            # 3. Poll Telegram Updates (messages + callback_query touch buttons)
             url = (
                 f"https://api.telegram.org/bot{bot_token}/getUpdates"
                 f"?timeout=12&offset={offset}&allowed_updates=%5B%22message%22,%22callback_query%22%5D"
@@ -1266,13 +1224,10 @@ def run_polling_bot(bot_token: str) -> None:
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
 
-                # Handle Inline Touch Button Taps concurrently
+                # Herkes butonlara dokunabilir
                 if "callback_query" in upd:
                     cq = upd["callback_query"]
                     cq_chat_id = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
-                    if auth_chat_id and cq_chat_id and cq_chat_id != auth_chat_id:
-                        answer_callback_query(bot_token, str(cq.get("id", "")), "⛔ Yetkisiz kullanıcı.", show_alert=True)
-                        continue
                     worker_pool.submit(_safe_callback_worker, bot_token, cq, cq_chat_id)
                     continue
 
@@ -1282,13 +1237,7 @@ def run_polling_bot(bot_token: str) -> None:
                 if not chat_id or not text:
                     continue
 
-                if not auth_chat_id:
-                    auth_chat_id = chat_id
-                    save_telegram_config(bot_token, chat_id)
-                elif chat_id != auth_chat_id:
-                    send_telegram_message(bot_token, chat_id, "⛔ Bu bot yalnızca yetkili hesap tarafından kullanılabilir.")
-                    continue
-
+                # Yetki filtresi tamamen kaldırıldı: Gelen her kullanıcı veya grup komutları işleyebilir
                 worker_pool.submit(_handle_message_command, bot_token, chat_id, text)
 
         except KeyboardInterrupt:

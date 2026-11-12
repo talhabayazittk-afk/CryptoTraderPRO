@@ -278,7 +278,7 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v8.0",
+    _engine_version: str = "v8.2",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
     Parallel cached pipeline (v3.0):
@@ -500,6 +500,11 @@ with st.sidebar:
                 st.warning(msg_t)
 
     bot_alive, bot_pid = is_bot_running()
+    if not bot_alive and tg_token_input.strip() and not st.session_state.get("bot_manually_stopped", False):
+        save_telegram_config(tg_token_input, tg_chat_input)
+        start_bot_background()
+        bot_alive, bot_pid = is_bot_running()
+
     if bot_alive:
         st.caption(f"🟢 **Bot Durumu:** Arka Planda Çalışıyor (PID: `{bot_pid}`) | Aktif Alarm: `{len(tg_state.get('alarms', []))}`")
     else:
@@ -511,6 +516,7 @@ with st.sidebar:
             if not tg_token_input.strip():
                 st.warning("Önce Telegram Bot Token girip kaydedin.")
             else:
+                st.session_state["bot_manually_stopped"] = False
                 save_telegram_config(tg_token_input, tg_chat_input)
                 ok_b, msg_b = start_bot_background()
                 if ok_b:
@@ -520,6 +526,7 @@ with st.sidebar:
                     st.error(msg_b)
     with bot_c2:
         if st.button("⏹️ Botu Durdur", use_container_width=True):
+            st.session_state["bot_manually_stopped"] = True
             ok_s, msg_s = stop_bot_background()
             st.info(msg_s)
             st.rerun()

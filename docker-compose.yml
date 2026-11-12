@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  kripto-terminal:
+    build: .
+    container_name: akilli-kripto-terminal
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./watchlist.json:/app/watchlist.json
+      - ./telegram_config.json:/app/telegram_config.json
+      - ./telegram_state.json:/app/telegram_state.json

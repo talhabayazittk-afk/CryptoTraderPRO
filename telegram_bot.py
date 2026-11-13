@@ -41,20 +41,19 @@ from src.data_fetcher import CryptoDataFetcher
 from src.indicators import TechnicalIndicators
 from src.patterns import CandlestickPatternDetector
 from src.signals import MarketForecast, SignalEngine
+import src.telegram_notifier as _tg_notifier
 from src.telegram_notifier import (
     PID_FILE,
     add_price_alarm,
     answer_callback_query,
     build_alarm_radar_inline_keyboard,
     build_analysis_inline_keyboard,
-    build_breakout_radar_inline_keyboard,
     build_coin_list_inline_keyboard,
     build_futures_radar_inline_keyboard,
     build_futures_setup_inline_keyboard,
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
     edit_telegram_message,
-    format_breakout_radar_scan_telegram_html,
     format_forecast_telegram_html,
     format_futures_radar_scan_telegram_html,
     format_futures_setup_telegram_html,
@@ -71,6 +70,58 @@ from src.telegram_notifier import (
     save_telegram_state,
     send_telegram_message,
     send_telegram_photo,
+)
+
+
+def _bot_fallback_build_breakout_radar_kb(entries: List[Dict[str, Any]], timeframe: str = "1H") -> Dict[str, Any]:
+    tf_up = timeframe.upper()
+    tf_row = [
+        {"text": f"✅ {t}" if t == tf_up else f"🚨 {t}", "callback_data": f"brk_scan:{t}"}
+        for t in ("15M", "1H", "4H", "1D")
+    ]
+    rows: List[List[Dict[str, str]]] = [tf_row]
+    btn_row: List[Dict[str, str]] = []
+    for r in entries[:8]:
+        sym = str(r.get("symbol", "")).upper()
+        if not sym:
+            continue
+        btn_row.append({"text": f"📊 {sym.replace('/USDT', '')}", "callback_data": f"an:{sym}:{tf_up}"})
+        if len(btn_row) == 2:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+    return {"inline_keyboard": rows}
+
+
+def _bot_fallback_format_breakout_radar_html(entries: List[Dict[str, Any]], timeframe: str = "1H") -> str:
+    tf_up = timeframe.upper()
+    lines = [
+        f"🚨 <b>DESTEK / DİRENÇ KIRILIM RADARI [{tf_up}]</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for r in entries[:10]:
+        sym = str(r.get("symbol", ""))
+        price = float(r.get("price", 0.0))
+        fc = r.get("fc")
+        p_fmt = ",.4f" if price < 10.0 else ",.2f"
+        sr_status = getattr(fc, "sr_action_status_tr", "") or "Kırılım Bekleniyor"
+        guide = getattr(fc, "sr_breakout_guide_tr", "")
+        lines.append(f"• <b>{sym}</b> (<code>{format(price, p_fmt)} USDT</code>) — {sr_status}")
+        if guide:
+            lines.append(f"  ↳ <i>{guide}</i>")
+    return "\n".join(lines)
+
+
+build_breakout_radar_inline_keyboard = getattr(
+    _tg_notifier,
+    "build_breakout_radar_inline_keyboard",
+    _bot_fallback_build_breakout_radar_kb,
+)
+format_breakout_radar_scan_telegram_html = getattr(
+    _tg_notifier,
+    "format_breakout_radar_scan_telegram_html",
+    _bot_fallback_format_breakout_radar_html,
 )
 
 LOG_FILE = Path(__file__).resolve().parent / "telegram_bot.log"
@@ -224,15 +275,20 @@ def _compute_full_coin_bundle(
     for k in reversed(ordered_tfs):
         btc_sc_k = btc_scores_ref.get(k) if (btc_scores_ref and not sym_key.startswith("BTC/")) else None
         btc_df_k = btc_tf_data_ref.get(k) if (btc_tf_data_ref and not sym_key.startswith("BTC/")) else None
-        fc_k = sig.generate_forecast(
-            tf_data[k],
-            order_flow=intel,
-            htf_score=htf_prev,
-            btc_regime_score=btc_sc_k,
-            symbol=sym_key,
-            btc_df=btc_df_k,
-            htf_sr_levels=list(htf_sr_pool) if htf_sr_pool else None,
-        )
+        gf_kwargs: Dict[str, Any] = {
+            "order_flow": intel,
+            "htf_score": htf_prev,
+            "btc_regime_score": btc_sc_k,
+            "symbol": sym_key,
+            "btc_df": btc_df_k,
+        }
+        try:
+            import inspect as _insp
+            if "htf_sr_levels" in _insp.signature(sig.generate_forecast).parameters:
+                gf_kwargs["htf_sr_levels"] = list(htf_sr_pool) if htf_sr_pool else None
+        except Exception:
+            pass
+        fc_k = sig.generate_forecast(tf_data[k], **gf_kwargs)
         tf_forecasts[k] = fc_k
         mtf_scores[k] = fc_k.score
         htf_prev = fc_k.score

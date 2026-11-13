@@ -10,7 +10,7 @@ import importlib
 import inspect
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,7 +34,10 @@ if (
     or not getattr(src.visualizer, "_V6_0_READY", False)
     or not hasattr(src.telegram_notifier, "build_analysis_inline_keyboard")
     or not hasattr(src.telegram_notifier, "build_futures_radar_inline_keyboard")
+    or not hasattr(src.telegram_notifier, "build_breakout_radar_inline_keyboard")
+    or not hasattr(src.telegram_notifier, "format_breakout_radar_scan_telegram_html")
     or not hasattr(src.signals, "FuturesSetupReport")
+    or not hasattr(src.signals.MarketForecast, "sr_breakout_guide_tr")
 ):
     for _mod in (
         src.config,
@@ -47,7 +50,10 @@ if (
         src.telegram_notifier,
         src,
     ):
-        importlib.reload(_mod)
+        try:
+            importlib.reload(_mod)
+        except Exception:
+            pass
     st.cache_data.clear()
 
 from src.config import AnalysisConfig, ChartConfig, ExchangeConfig, IndicatorConfig, PatternConfig
@@ -57,13 +63,11 @@ from src.patterns import CandlestickPatternDetector, PATTERN_INFO_TR
 from src.signals import MarketForecast, SignalEngine
 from src.telegram_notifier import (
     build_analysis_inline_keyboard,
-    build_breakout_radar_inline_keyboard,
     build_coin_list_inline_keyboard,
     build_futures_radar_inline_keyboard,
     build_futures_setup_inline_keyboard,
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
-    format_breakout_radar_scan_telegram_html,
     format_forecast_telegram_html,
     format_futures_radar_scan_telegram_html,
     format_futures_setup_telegram_html,
@@ -78,6 +82,58 @@ from src.telegram_notifier import (
     send_telegram_photo,
     start_bot_background,
     stop_bot_background,
+)
+
+
+def _fallback_build_breakout_radar_inline_keyboard(entries: list, timeframe: str = "1H") -> dict:
+    tf_up = timeframe.upper()
+    tf_row = [
+        {"text": f"✅ {t}" if t == tf_up else f"🚨 {t}", "callback_data": f"brk_scan:{t}"}
+        for t in ("15M", "1H", "4H", "1D")
+    ]
+    rows = [tf_row]
+    btn_row = []
+    for r in entries[:8]:
+        sym = str(r.get("symbol", "")).upper()
+        if not sym:
+            continue
+        btn_row.append({"text": f"📊 {sym.replace('/USDT', '')}", "callback_data": f"an:{sym}:{tf_up}"})
+        if len(btn_row) == 2:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+    return {"inline_keyboard": rows}
+
+
+def _fallback_format_breakout_radar_scan_telegram_html(entries: list, timeframe: str = "1H") -> str:
+    tf_up = timeframe.upper()
+    lines = [
+        f"🚨 <b>DESTEK / DİRENÇ KIRILIM RADARI [{tf_up}]</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for r in entries[:10]:
+        sym = str(r.get("symbol", ""))
+        price = float(r.get("price", 0.0))
+        fc = r.get("fc")
+        p_fmt = ",.4f" if price < 10.0 else ",.2f"
+        sr_status = getattr(fc, "sr_action_status_tr", "") or "Kırılım Bekleniyor"
+        guide = getattr(fc, "sr_breakout_guide_tr", "")
+        lines.append(f"• <b>{sym}</b> (<code>{format(price, p_fmt)} USDT</code>) — {sr_status}")
+        if guide:
+            lines.append(f"  ↳ <i>{guide}</i>")
+    return "\n".join(lines)
+
+
+build_breakout_radar_inline_keyboard = getattr(
+    src.telegram_notifier,
+    "build_breakout_radar_inline_keyboard",
+    _fallback_build_breakout_radar_inline_keyboard,
+)
+format_breakout_radar_scan_telegram_html = getattr(
+    src.telegram_notifier,
+    "format_breakout_radar_scan_telegram_html",
+    _fallback_format_breakout_radar_scan_telegram_html,
 )
 from src.visualizer import InteractiveChartVisualizer
 
@@ -329,17 +385,18 @@ def load_coin_intelligence(
             else None
         )
         btc_df = btc_tf_data.get(tf_key) if btc_tf_data else None
-        forecast = signal_engine.generate_forecast(
-            df_final,
-            order_flow=order_flow,
-            htf_score=htf_prev_score,
-            btc_regime_score=btc_score,
-            symbol=symbol,
-            btc_df=btc_df,
-            sample_capital_usd=sample_capital_usd,
-            risk_pct=risk_pct,
-            htf_sr_levels=list(htf_sr_pool) if htf_sr_pool else None,
-        )
+        gf_kwargs: Dict[str, Any] = {
+            "order_flow": order_flow,
+            "htf_score": htf_prev_score,
+            "btc_regime_score": btc_score,
+            "symbol": symbol,
+            "btc_df": btc_df,
+            "sample_capital_usd": sample_capital_usd,
+            "risk_pct": risk_pct,
+        }
+        if "htf_sr_levels" in inspect.signature(signal_engine.generate_forecast).parameters:
+            gf_kwargs["htf_sr_levels"] = list(htf_sr_pool) if htf_sr_pool else None
+        forecast = signal_engine.generate_forecast(df_final, **gf_kwargs)
         tf_forecasts[tf_key] = forecast
         coin_scores[tf_key] = forecast.score
         htf_prev_score = forecast.score

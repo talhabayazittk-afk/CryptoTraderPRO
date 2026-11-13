@@ -278,7 +278,7 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v8.2",
+    _engine_version: str = "v9.2",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
     Parallel cached pipeline (v3.0):
@@ -302,6 +302,7 @@ def load_coin_intelligence(
         timeframes=list(timeframes),
         limit=limit,
         exchange_id=exchange_id,
+        allow_synthetic_fallback=False,
     )
     order_flow = fetcher.fetch_order_flow_intel(symbol=symbol, exchange_id=exchange_id)
 
@@ -317,6 +318,7 @@ def load_coin_intelligence(
 
     # Evaluate from highest timeframe (1D -> 4H -> 1H -> 15M) so HTF feeds into LTF
     htf_prev_score: Optional[float] = None
+    htf_sr_pool: List[Any] = []
     for tf_key in reversed(ordered_tfs):
         df_final = tf_data[tf_key]
         btc_score = (
@@ -334,10 +336,14 @@ def load_coin_intelligence(
             btc_df=btc_df,
             sample_capital_usd=sample_capital_usd,
             risk_pct=risk_pct,
+            htf_sr_levels=list(htf_sr_pool) if htf_sr_pool else None,
         )
         tf_forecasts[tf_key] = forecast
         coin_scores[tf_key] = forecast.score
         htf_prev_score = forecast.score
+        if tf_key in ("1D", "4H"):
+            htf_sr_pool.extend(forecast.support_levels[:2])
+            htf_sr_pool.extend(forecast.resistance_levels[:2])
 
     tf_forecasts = {k: tf_forecasts[k] for k in ordered_tfs}
     return tf_data, tf_forecasts, order_flow, source_used, coin_scores
@@ -358,9 +364,9 @@ with st.sidebar:
 
     exchange_choice = st.selectbox(
         "Birincil Kripto Borsası",
-        options=["binance", "bybit", "okx", "kraken"],
+        options=["binance", "gate", "kucoin", "kraken", "coinbase", "okx", "bybit"],
         index=0,
-        help="Binance üzerinde gerçek Taker Buy/Sell CVD ve Vadeli OI değişimi doğrudan çekilir.",
+        help="Binance (Global Vision), Gate.io, KuCoin, Kraken ve Coinbase üzerinde canlı Spot/Vadeli veriler çekilir.",
     )
 
     candle_limit = st.slider(
@@ -465,9 +471,11 @@ with st.sidebar:
     if (
         send_chart_chk != bool(tg_state.get("send_chart_with_analysis", False))
         or radar_chk != bool(tg_state.get("radar_enabled", True))
+        or exchange_choice != str(tg_state.get("primary_exchange", "binance"))
     ):
         tg_state["send_chart_with_analysis"] = send_chart_chk
         tg_state["radar_enabled"] = radar_chk
+        tg_state["primary_exchange"] = exchange_choice
         save_telegram_state(tg_state)
 
     tg_b1, tg_b2 = st.columns(2)
@@ -627,6 +635,8 @@ with st.spinner("Canlı borsa verileri, trend, para giriş/çıkışı ve likida
             else:
                 fut_radar_tag = "⛔ Hesaplanmadı"
 
+            sup_icon_1h = "🛡️" if getattr(fc_1h, "nearest_support_score", 0.0) >= 58.0 else "🟢"
+            res_icon_1h = "🧱" if getattr(fc_1h, "nearest_resistance_score", 0.0) >= 58.0 else "🔴"
             screener_rows.append({
                 "_sort_ready": fc_1h.readiness_score_5,
                 "_sort_whale": abs(fc_1h.whale_accumulation_score - 50.0),
@@ -646,7 +656,7 @@ with st.spinner("Canlı borsa verileri, trend, para giriş/çıkışı ve likida
                 "1G Trend": badge(fc_1d.score),
                 "Para Akışı (1S)": flow_tag,
                 "🐋 Balina İzi": f"{fc_1h.whale_accumulation_score:.0f}/100",
-                "Destek / Direnç": f"{price_fmt(fc_1h.nearest_support)} / {price_fmt(fc_1h.nearest_resistance)}",
+                "Destek / Direnç": f"{sup_icon_1h} {price_fmt(fc_1h.nearest_support)} / {res_icon_1h} {price_fmt(fc_1h.nearest_resistance)}",
             })
         except Exception as exc:
             st.error(f"{sym} verisi alınırken hata oluştu: {exc}")
@@ -823,14 +833,25 @@ for tf_k in ("15M", "1H", "4H", "1D"):
         f"<b>{tf_k}:</b> <span style='color:{c_k}; font-weight:700;'>{lbl_k} ({sc_k:+.0f})</span></span>"
     )
 
-rd_col = "#00E676" if fc_active.readiness_score_5 >= 4 else ("#FACC15" if fc_active.readiness_score_5 == 3 else "#FF5252")
-rd_short = "Güçlü Kurulum" if fc_active.readiness_score_5 >= 4 else ("Temkinli İzle" if fc_active.readiness_score_5 == 3 else "Bekle-Gör")
+rd_fut = getattr(fc_active, "futures_setup", None)
+if rd_fut and rd_fut.is_tradeable and fc_active.readiness_score_5 >= 4:
+    rd_col = "#00E676"
+    rd_short = f"Güçlü Kurulum ({rd_fut.direction})"
+elif rd_fut and rd_fut.is_tradeable:
+    rd_col = "#38BDF8"
+    rd_short = f"İşleme Uygun ({rd_fut.direction})"
+elif fc_active.readiness_score_5 >= 3:
+    rd_col = "#FACC15"
+    rd_short = "Kırılım / Onay Bekleniyor"
+else:
+    rd_col = "#FF5252"
+    rd_short = "Bekle-Gör (Riskli)"
 
 st.markdown(
     f"""
     <div style="background:#111827; border:1px solid #1E293B; border-left:5px solid {score_col}; border-radius:10px; padding:11px 16px; margin-bottom:14px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px;">
         <div style="font-size:14px;">
-            <b style="color:#F8FAFC; font-size:15px;">{active_symbol} ({active_tf}):</b>
+            <b style="color:#F8FAFC; font-size:15px;">{active_symbol} ({active_tf}) <span style="color:#64748B; font-size:12px;">[{source_used}]</span>:</b>
             <span style="color:{score_col}; font-weight:800; font-size:15px; margin-left:6px;">{main_trend_title} ({fc_active.score:+.0f}/100)</span>
             <span style="color:#94A3B8; font-size:13px; margin-left:6px;">— {main_trend_desc}</span>
             &nbsp;|&nbsp;
@@ -941,16 +962,24 @@ if smc_act and smc_act.liquidation_pools:
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
+    tl_rep = getattr(fc_active, "trendlines", None)
+    tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
+    sr_act_type = getattr(fc_active, "sr_action_type", "NONE")
+    sr_act_str = getattr(fc_active, "sr_action_status_tr", "")
+    if sr_act_type != "NONE" and sr_act_str:
+        breakout_line_html = f"• <b>Seviye Onayı / Tuzak:</b> <b style='color:#38BDF8;'>{sr_act_str}</b>"
+    else:
+        breakout_line_html = f"• <b>Kırılım İzi:</b> {breakout_text}"
+    tl_line_html = f"• <b>Dinamik Kanal:</b> {tl_summary}<br>" if tl_summary else ""
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid {score_col};">
             <div class="kpi-title">1️⃣ MEVCUT TREND & KIRILIMLAR ({active_tf})</div>
             <div class="kpi-value" style="color:{score_col};">{main_trend_title}</div>
             <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                • <b>Kırılım İzi:</b> {breakout_text}<br>
-                • <b>Sıkışma Durumu:</b> {squeeze_short}<br>
-                • <b>Yukarı Kırılım Eşiği:</b> <b style="color:#00E676;">{price_fmt(up_break_price)}</b> üstü<br>
-                • <b>Aşağı Kırılım Eşiği:</b> <b style="color:#FF5252;">{price_fmt(down_break_price)}</b> altı
+                {breakout_line_html}<br>
+                {tl_line_html}• <b>Sıkışma Durumu:</b> {squeeze_short}<br>
+                • <b>Yukarı / Aşağı Eşik:</b> <b style="color:#00E676;">{price_fmt(up_break_price)}</b> üstü / <b style="color:#FF5252;">{price_fmt(down_break_price)}</b> altı
             </div>
         </div>
         """,
@@ -958,18 +987,61 @@ with c1:
     )
 
 with c2:
-    sup2_html = f" <span style='color:#94A3B8;'>(2. Destek: {price_fmt(sup2_val)})</span>" if sup2_val else ""
-    res2_html = f" <span style='color:#94A3B8;'>(2. Direnç: {price_fmt(res2_val)})</span>" if res2_val else ""
+    sup1_tier = getattr(fc_active, "nearest_support_tier_tr", "🟢 Destek")
+    sup1_score = getattr(fc_active, "nearest_support_score", 0.0)
+    sup1_reason = getattr(fc_active, "nearest_support_reason_tr", "")
+    res1_tier = getattr(fc_active, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res1_score = getattr(fc_active, "nearest_resistance_score", 0.0)
+    res1_reason = getattr(fc_active, "nearest_resistance_reason_tr", "")
+
+    s1_stats = getattr(fc_active.support_levels[0], "stats_summary_tr", "") if fc_active.support_levels else ""
+    r1_stats = getattr(fc_active.resistance_levels[0], "stats_summary_tr", "") if fc_active.resistance_levels else ""
+    s1_htf = " · 🏛️ Üst Periyot Duvarı" if (fc_active.support_levels and getattr(fc_active.support_levels[0], "htf_confirmed", False) and "Üst Periyot" not in sup1_reason) else ""
+    r1_htf = " · 🏛️ Üst Periyot Duvarı" if (fc_active.resistance_levels and getattr(fc_active.resistance_levels[0], "htf_confirmed", False) and "Üst Periyot" not in res1_reason) else ""
+
+    sup1_badge = f" <span style='color:#94A3B8; font-size:11px;'>({sup1_score:.0f}/100{f' · {sup1_reason}' if sup1_reason else ''}{s1_htf}{f' · {s1_stats}' if s1_stats else ''})</span>" if sup1_score > 0 else ""
+    res1_badge = f" <span style='color:#94A3B8; font-size:11px;'>({res1_score:.0f}/100{f' · {res1_reason}' if res1_reason else ''}{r1_htf}{f' · {r1_stats}' if r1_stats else ''})</span>" if res1_score > 0 else ""
+
+    if len(fc_active.support_levels) > 1:
+        s2_obj = fc_active.support_levels[1]
+        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Destek")
+        s2_sc = getattr(s2_obj, "strength_score", 0.0)
+        s2_st = getattr(s2_obj, "stats_summary_tr", "")
+        sup2_html = f"<br>• <span style='color:#94A3B8;'>2. {s2_tier}:</span> <b style='color:#34D399;'>{price_fmt(s2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({s2_sc:.0f}/100{f' · {s2_st}' if s2_st else ''})</span>"
+    else:
+        sup2_html = ""
+
+    if len(fc_active.resistance_levels) > 1:
+        r2_obj = fc_active.resistance_levels[1]
+        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Direnç")
+        r2_sc = getattr(r2_obj, "strength_score", 0.0)
+        r2_st = getattr(r2_obj, "stats_summary_tr", "")
+        res2_html = f"<br>• <span style='color:#94A3B8;'>2. {r2_tier}:</span> <b style='color:#FB7185;'>{price_fmt(r2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({r2_sc:.0f}/100{f' · {r2_st}' if r2_st else ''})</span>"
+    else:
+        res2_html = ""
+
+    fut_c2 = getattr(fc_active, "futures_setup", None)
+    if fut_c2 and fut_c2.is_tradeable:
+        c2_target_line = (
+            f"• 🎯 <b>Onaylı Hedef ({fut_c2.direction}):</b> <b style='color:#38BDF8;'>{price_fmt(fut_c2.tp1_price)}</b> ➔ <b style='color:#00E676;'>{price_fmt(fut_c2.tp2_price)}</b> "
+            f"| <b>Stop:</b> <b style='color:#FF5252;'>{price_fmt(fut_c2.stop_price)}</b>"
+        )
+    else:
+        channel_pct = abs((res_val or last_price) - (sup_val or last_price)) / max(last_price, 1e-9) * 100.0
+        c2_target_line = (
+            f"• 📐 <b>Kanal Genişliği:</b> <b>%{channel_pct:.2f}</b> "
+            f"<span style='color:#F59E0B; font-size:11.5px;'>(Risk Kalkanı Aktif: Kırılım Öncesi İşlem/TP Önerilmez)</span>"
+        )
+
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid #38BDF8;">
-            <div class="kpi-title">2️⃣ DESTEK, DİRENÇ & HEDEFLER</div>
+            <div class="kpi-title">2️⃣ DESTEK & DİRENÇ MİMARİSİ</div>
             <div class="kpi-value" style="color:#F8FAFC;">Fiyat: {price_fmt(last_price)} <span style="font-size:13px; color:#94A3B8;">USDT</span></div>
-            <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                • 🟢 <b>Destek (Taban):</b> <b style="color:#00E676;">{price_fmt(sup_val)}</b>{sup2_html}<br>
-                • 🔴 <b>Direnç (Tavan):</b> <b style="color:#FF5252;">{price_fmt(res_val)}</b>{res2_html}<br>
-                • 🎯 <b>{dir_label_tr}:</b> <b style="color:#38BDF8;">{price_fmt(tp1_disp)}</b> ➔ <b style="color:#00E676;">{price_fmt(tp2_disp)}</b><br>
-                • 🛡️ <b>Zarar-Kes (Stop):</b> <b style="color:#FF5252;">{price_fmt(stop_disp)}</b>
+            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
+                • <b>{sup1_tier}:</b> <b style="color:#00E676;">{price_fmt(sup_val)}</b>{sup1_badge}{sup2_html}<br>
+                • <b>{res1_tier}:</b> <b style="color:#FF5252;">{price_fmt(res_val)}</b>{res1_badge}{res2_html}<br>
+                {c2_target_line}
             </div>
         </div>
         """,
@@ -977,13 +1049,15 @@ with c2:
     )
 
 with c3:
+    has_real_taker_col = bool(last_row.get("has_real_taker_flow", False))
+    delta_label_tr = "Son 20 Mum Nakit (Gerçek Taker)" if has_real_taker_col else "Son 20 Mum Nakit (Hacim Tahmini)"
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid {mf_col};">
             <div class="kpi-title">3️⃣ PARA GİRİŞ / ÇIKIŞI & BALİNALAR</div>
             <div class="kpi-value" style="color:{mf_col};">{mf_headline}</div>
             <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                • 💵 <b>Son 20 Mum Nakit:</b> <b>{delta_fmt_str}</b><br>
+                • 💵 <b>{delta_label_tr}:</b> <b>{delta_fmt_str}</b><br>
                 • 🐋 <b>Balina Durumu:</b> {whale_short}<br>
                 • 📘 <b>Bekleyen Emirler:</b> <b>%{order_flow.imbalance_pct:.0f} Alıcı</b> / %{100 - order_flow.imbalance_pct:.0f} Satıcı<br>
                 • 🧱 <b>Duvarlar:</b> Alış <b style="color:#00E676;">{price_fmt(order_flow.strongest_bid_wall)}</b> | Satış <b style="color:#FF5252;">{price_fmt(order_flow.strongest_ask_wall)}</b>
@@ -1002,13 +1076,13 @@ with c4:
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid #A855F7;">
-            <div class="kpi-title">4️⃣ MIKNATIS & LİKİDASYON SEVİYELERİ</div>
+            <div class="kpi-title">4️⃣ MIKNATIS (POC) & TASFİYE BÖLGELERİ</div>
             <div class="kpi-value" style="color:#FACC15;">🧲 Mıknatıs: {price_fmt(fc_active.poc_price)}</div>
             <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
                 • 🟡 <b>En Yoğun Fiyat (POC):</b> {poc_relation}<br>
-                • ⚓ <b>Dip Alıcı Maliyeti:</b> <b>{price_fmt(fc_active.avwap_low_price)}</b><br>
-                • ⬆️ <b>Yukarı Likidasyon (Short):</b> {short_liq_str}<br>
-                • ⬇️ <b>Aşağı Likidasyon (Long):</b> {long_liq_str}
+                • ⚓ <b>Dip Alıcı Maliyeti (AVWAP):</b> <b>{price_fmt(fc_active.avwap_low_price)}</b><br>
+                • ⬆️ <b>Tahmini Short Tasfiye (25x-50x):</b> {short_liq_str}<br>
+                • ⬇️ <b>Tahmini Long Tasfiye (25x-50x):</b> {long_liq_str}
             </div>
         </div>
         """,
@@ -1121,6 +1195,8 @@ if fut_active is not None:
                 unsafe_allow_html=True,
             )
         with fc_f3:
+            lev_sq_str = getattr(fut_active, "leverage_squeeze_status_tr", "") or getattr(fc_active, "leverage_squeeze_status_tr", "")
+            lev_sq_html = f"• ⚡ <b>Kaldıraç Sıkıştırma:</b> <b style='color:#38BDF8;'>{lev_sq_str}</b><br>" if lev_sq_str else ""
             fluences_html = "<br>".join([f"• ✅ {item}" for item in fut_active.positive_factors_tr[:4]])
             warnings_html = (
                 "<br>".join([f"• ⚠️ {w}" for w in fut_active.risk_warnings_tr[:2]])
@@ -1133,7 +1209,7 @@ if fut_active is not None:
                     <div class="kpi-title">🔬 3. VADELİ TEKNİK ONAYLAR & FONLAMA/OI</div>
                     <div class="kpi-value" style="color:#FACC15; font-size:1.05rem;">📊 {fut_active.futures_tech_summary_tr.split('|')[0]}</div>
                     <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
-                        {fluences_html}<br>
+                        {lev_sq_html}{fluences_html}<br>
                         {warnings_html}
                     </div>
                 </div>
@@ -1194,12 +1270,13 @@ is_clean = preset_mode.startswith("✨")
 is_sr_focus = preset_mode.startswith("🧱")
 is_smc_focus = preset_mode.startswith("🧲")
 is_all = preset_mode.startswith("🔬")
+default_proj_box = bool((fut_active and fut_active.is_tradeable) or is_all)
 
 with st.expander("➕ Gelişmiş Detaylar: Tekil Çizgi Ayarları, 5 Kriterli Onay Listesi, Kasa Planı & Faktör Grafiği", expanded=False):
     chk_c1, chk_c2, chk_c3, chk_c4 = st.columns(4)
     with chk_c1:
         show_ema_ribbon = st.checkbox("🌊 Ana Trend Çizgileri (EMA 20 & 50)", value=True, key=f"ema_{preset_mode}")
-        show_projection_box = st.checkbox("🎯 Hedef & Zarar-Kes (Stop) Kutusu", value=True, key=f"proj_{preset_mode}")
+        show_projection_box = st.checkbox("🎯 Hedef & Zarar-Kes (Stop) Kutusu", value=default_proj_box, key=f"proj_{preset_mode}")
         show_reversal_markers = st.checkbox("🔺 Dönüş Sinyali Üçgenleri (▲/▼)", value=True, key=f"rev_{preset_mode}")
     with chk_c2:
         show_sr_zones = st.checkbox("🟢🔴 Destek & Direnç Bölgeleri", value=(is_clean or is_sr_focus or is_all), key=f"sr_{preset_mode}")
@@ -1207,7 +1284,7 @@ with st.expander("➕ Gelişmiş Detaylar: Tekil Çizgi Ayarları, 5 Kriterli On
         show_kalman_avwap = st.checkbox("⚓ Dip/Tepe Maliyet & Erken Trend", value=(is_sr_focus or is_all), key=f"kav_{preset_mode}")
         show_vpvr = st.checkbox("📊 Yatay Hacim Barları (VPVR)", value=(is_sr_focus or is_all), key=f"vpvr_{preset_mode}")
     with chk_c3:
-        show_liq_pools = st.checkbox("🧲 Likidasyon Mıknatısları", value=(is_clean or is_smc_focus or is_all), key=f"liq_{preset_mode}")
+        show_liq_pools = st.checkbox("🧲 Tahmini Tasfiye Mıknatısları", value=(is_smc_focus or is_all), key=f"liq_{preset_mode}")
         show_smc = st.checkbox("🏦 Balina Emir Kutuları (OB/FVG)", value=(is_smc_focus or is_all), key=f"smc_{preset_mode}")
         show_prob_cone = st.checkbox("🔮 Olasılık Yelpazesi (%68)", value=(is_smc_focus or is_all), key=f"cone_{preset_mode}")
     with chk_c4:
@@ -1295,16 +1372,76 @@ main_fig = visualizer.create_figure(
 st.plotly_chart(main_fig, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# BOTTOM TABS
+# BOTTOM TABS (3 CLEAN, NON-REDUNDANT PROFESSIONAL TABS)
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3 = st.tabs([
+    "⏱️ Tüm Zaman Dilimleri (15M / 1H / 4H / 1D) & Vadeli Kurulum Karşılaştırması",
     f"📋 {active_symbol} ({active_tf}) Kapanmış Mum Formasyon & Sinyal Geçmişi",
-    "⏱️ Tüm Zaman Dilimleri (15M / 1H / 4H / 1D) & Backtest Karşılaştırma Tablosu",
     "🧭 Piyasa Genişliği (ETH/BTC Rotasyon) & Portföy Korelasyon Matrisi",
-    "📘 Türkçe Mum Formasyonları, Hacim POC ve Para Akışı Sözlüğü",
 ])
 
 with tab1:
+    mtf_rows = []
+    for tf_k, fc_k in tf_forecasts.items():
+        bt_k = fc_k.backtest_stats
+        fs_k = getattr(fc_k, "futures_setup", None)
+        if fs_k and fs_k.is_tradeable:
+            fut_col_str = f"{'🟢 LONG' if fs_k.direction == 'LONG' else '🔴 SHORT'} ({fs_k.confidence_score:.0f}/100 · 1:{fs_k.rr_ratio:.2f})"
+            tp_col_str = f"{price_fmt(fs_k.tp1_price)} / {price_fmt(fs_k.tp2_price)} USDT"
+            stop_col_str = f"{price_fmt(fs_k.stop_price)} USDT"
+        else:
+            sc_f = fs_k.confidence_score if fs_k else 0.0
+            fut_col_str = f"⛔ İşlem Önerilmez (Güven: {sc_f:.0f}/100)"
+            tp_col_str = "Kırılım Bekleniyor"
+            stop_col_str = "—"
+
+        s_tier_k = getattr(fc_k, "nearest_support_tier_tr", "🟢 Destek")
+        r_tier_k = getattr(fc_k, "nearest_resistance_tier_tr", "🔴 Direnç")
+        mtf_rows.append({
+            "Zaman Dilimi": tf_k,
+            "Yön Skoru": f"{fc_k.score:+.1f} / 100",
+            "Hazırlık": f"{fc_k.readiness_score_5}/5",
+            "⚡ Vadeli İşlem Radarı": fut_col_str,
+            "Destek / Direnç (Güç Sınıfı)": f"{s_tier_k}: {price_fmt(fc_k.nearest_support)} | {r_tier_k}: {price_fmt(fc_k.nearest_resistance)}",
+            "Onaylı TP1 / TP2": tp_col_str,
+            "Onaylı Stop": stop_col_str,
+            "Para Akışı & CVD": f"{fc_k.money_flow_status_tr}",
+            "Dönüş Sinyali Backtest": f"%{bt_k.win_rate_pct:.1f} (TP1: %{bt_k.tp1_hit_rate_pct:.0f} | PF:{bt_k.profit_factor:.2f})",
+        })
+    st.dataframe(pd.DataFrame(mtf_rows), use_container_width=True, hide_index=True)
+
+    bt_act = fc_active.backtest_stats
+    if bt_act.equity_curve_r and len(bt_act.equity_curve_r) >= 2:
+        st.markdown(f"#### 📈 {active_symbol} ({active_tf}) — Geçmiş Dönüş Sinyallerinin Kümülatif Performans Eğrisi (Net R Birimi)")
+        st.caption(
+            "Bu grafik, seçili zaman diliminde geçmişte oluşan onaylı mum dönüş sinyallerinin kademeli kâr alma (TP1 + Başabaş Stop + TP2) "
+            "ve borsa komisyonu düşüldükten sonra kümülatif olarak nasıl sonuç verdiğini gösterir (+1R = 1 birim risk kazancı)."
+        )
+        eq_fig = go.Figure()
+        eq_fig.add_trace(
+            go.Scatter(
+                x=bt_act.equity_timestamps,
+                y=bt_act.equity_curve_r,
+                mode="lines+markers",
+                name="Kümülatif Net R Getirisi",
+                line=dict(color="#00E676" if bt_act.equity_curve_r[-1] >= 0 else "#FF5252", width=2.5),
+                fill="tozeroy",
+                fillcolor="rgba(0, 230, 118, 0.10)" if bt_act.equity_curve_r[-1] >= 0 else "rgba(255, 82, 82, 0.10)",
+                hovertemplate="<b>Sinyal Tarihi:</b> %{x}<br><b>Kümülatif Net Kazanç:</b> %{y:+.2f}R<extra></extra>",
+            )
+        )
+        eq_fig.update_layout(
+            template="plotly_dark",
+            height=270,
+            margin=dict(l=40, r=25, t=20, b=30),
+            paper_bgcolor="#111827",
+            plot_bgcolor="#111827",
+            yaxis_title="Kümülatif Net Getiri (R)",
+            xaxis_title="Geçmiş Sinyal Zamanı",
+        )
+        st.plotly_chart(eq_fig, use_container_width=True)
+
+with tab2:
     sig_engine = SignalEngine()
     summary_df = sig_engine.summarize_signals(df_active)
     if not summary_df.empty:
@@ -1330,58 +1467,19 @@ with tab1:
     else:
         st.info("Bu zaman diliminde filtre kriterlerini geçen sinyal bulunamadı.")
 
-with tab2:
-    mtf_rows = []
-    for tf_k, fc_k in tf_forecasts.items():
-        bt_k = fc_k.backtest_stats
-        mtf_rows.append({
-            "Zaman Dilimi": tf_k,
-            "Bileşik Yön Skoru": f"{fc_k.score:+.1f} / 100",
-            "Hazırlık Onayı": f"{fc_k.readiness_score_5}/5 ({fc_k.readiness_verdict_tr.split(' (')[0]})",
-            "Komisyon Düşülmüş Backtest": f"%{bt_k.win_rate_pct:.1f} (TP1 Temas: %{bt_k.tp1_hit_rate_pct:.0f} | PF:{bt_k.profit_factor:.2f} | MDD:-{bt_k.max_drawdown_r:.1f}R)",
-            "Genel Görünüm": fc_k.verdict_tr,
-            "Dinamik Rejim (ADX/Hurst/CHOP)": fc_k.regime_tr,
-            "Para Akışı & CVD Uyumsuzluk": f"{fc_k.money_flow_status_tr} | {fc_k.cvd_divergence_status_tr}",
-            "1. Hedef (TP1) / 2. Hedef (TP2)": f"{price_fmt(fc_k.tp1_price)} / {price_fmt(fc_k.tp2_price)} USDT",
-            "Zarar-Kes (Stop) Sınırı": f"{price_fmt(fc_k.stop_price)} USDT",
-            "Yakın Destek / Direnç": f"{price_fmt(fc_k.nearest_support)} / {price_fmt(fc_k.nearest_resistance)}",
-        })
-    st.dataframe(pd.DataFrame(mtf_rows), use_container_width=True, hide_index=True)
-
-    bt_act = fc_active.backtest_stats
-    if bt_act.equity_curve_r and len(bt_act.equity_curve_r) >= 2:
-        st.markdown(f"#### 📈 {active_symbol} ({active_tf}) — Geçmiş Sinyallerin Kümülatif Performans Eğrisi (Backtest Equity Curve — R Birimi)")
-        st.caption(
-            "Bu grafik, seçili zaman diliminde geçmişte üretilen onaylı dönüş sinyallerinin kademeli kâr alma (TP1 + Başabaş Stop + TP2) "
-            "ve borsa komisyonu düşüldükten sonra kümülatif olarak nasıl sonuç verdiğini gösterir (+1R = 1 birim risk kazancı)."
-        )
-        eq_fig = go.Figure()
-        eq_fig.add_trace(
-            go.Scatter(
-                x=bt_act.equity_timestamps,
-                y=bt_act.equity_curve_r,
-                mode="lines+markers",
-                name="Kümülatif Net R Getirisi",
-                line=dict(color="#00E676" if bt_act.equity_curve_r[-1] >= 0 else "#FF5252", width=2.5),
-                fill="tozeroy",
-                fillcolor="rgba(0, 230, 118, 0.10)" if bt_act.equity_curve_r[-1] >= 0 else "rgba(255, 82, 82, 0.10)",
-                hovertemplate="<b>Sinyal Tarihi:</b> %{x}<br><b>Kümülatif Net Kazanç:</b> %{y:+.2f}R<extra></extra>",
-            )
-        )
-        eq_fig.update_layout(
-            template="plotly_dark",
-            height=290,
-            margin=dict(l=40, r=25, t=25, b=35),
-            paper_bgcolor="#111827",
-            plot_bgcolor="#111827",
-            yaxis_title="Kümülatif Net Getiri (R)",
-            xaxis_title="Geçmiş Sinyal Zamanı",
-        )
-        st.plotly_chart(eq_fig, use_container_width=True)
+    with st.expander("📘 Türkçe Mum Formasyonları Rehberi (Açmak İçin Tıklayın)", expanded=False):
+        dict_rows = []
+        for eng, info in PATTERN_INFO_TR.items():
+            dict_rows.append({
+                "Türkçe Formasyon Adı": info["tr_name"],
+                "Uluslararası Adı": eng,
+                "Beklenen Yön Etkisi": info["direction"],
+                "Detaylı Yatırımcı Açıklaması": info["meaning"],
+            })
+        st.dataframe(pd.DataFrame(dict_rows), use_container_width=True, hide_index=True)
 
 with tab3:
     st.markdown(f"#### 🧭 Portföy Getiri Korelasyon Matrisi ({active_tf}) & Altcoin Rotasyon Analizi")
-    # Build return correlation matrix across all loaded watchlist symbols for active_tf
     ret_dict = {}
     bull_breadth = 0
     for sym_k, (tfd_k, tffc_k, _, _) in all_coin_results.items():
@@ -1422,14 +1520,3 @@ with tab3:
         st.dataframe(corr_df, use_container_width=True)
     else:
         st.caption("Korelasyon matrisi için izleme listenizde en az 2 coin bulunmalıdır.")
-
-with tab4:
-    dict_rows = []
-    for eng, info in PATTERN_INFO_TR.items():
-        dict_rows.append({
-            "Türkçe Formasyon Adı": info["tr_name"],
-            "Uluslararası Adı": eng,
-            "Beklenen Yön Etkisi": info["direction"],
-            "Detaylı Yatırımcı Açıklaması": info["meaning"],
-        })
-    st.dataframe(pd.DataFrame(dict_rows), use_container_width=True, hide_index=True)

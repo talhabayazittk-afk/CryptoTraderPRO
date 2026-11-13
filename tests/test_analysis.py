@@ -162,6 +162,24 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         )
         curr_p = float(df["close"].iloc[-1])
 
+        # v8.4 Support vs Strong Support & Resistance vs Strong Resistance verification
+        self.assertGreaterEqual(len(fc.support_levels), 1)
+        self.assertGreaterEqual(len(fc.resistance_levels), 1)
+        self.assertIn(fc.nearest_support_tier_tr, ("🟢 Destek", "🛡️ Güçlü Destek"))
+        self.assertIn(fc.nearest_resistance_tier_tr, ("🔴 Direnç", "🧱 Güçlü Direnç"))
+        self.assertGreaterEqual(fc.nearest_support_score, 25.0)
+        self.assertLessEqual(fc.nearest_support_score, 98.0)
+        self.assertGreaterEqual(fc.nearest_resistance_score, 25.0)
+        self.assertLessEqual(fc.nearest_resistance_score, 98.0)
+        for sl in fc.support_levels:
+            self.assertIn(sl.tier_tr, ("🟢 Destek", "🛡️ Güçlü Destek"))
+            self.assertGreaterEqual(sl.strength_score, 25.0)
+            self.assertTrue(len(sl.confluence_tags) >= 1)
+        for rl in fc.resistance_levels:
+            self.assertIn(rl.tier_tr, ("🔴 Direnç", "🧱 Güçlü Direnç"))
+            self.assertGreaterEqual(rl.strength_score, 25.0)
+            self.assertTrue(len(rl.confluence_tags) >= 1)
+
         # v8.0 Perpetual Futures (Vadeli İşlemler) Radar & Confidence Engine verification
         self.assertIsNotNone(fc.futures_setup)
         fut = fc.futures_setup
@@ -193,9 +211,9 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
             mtf_scores={"15M": -20.0, "1H": fc.score, "4H": -35.0, "1D": -30.0},
         )
         self.assertIn("MEVCUT TREND &amp; KIRILIMLAR", tg_msg)
-        self.assertIn("DESTEK, DİRENÇ &amp; HEDEFLER", tg_msg)
+        self.assertIn("DESTEK &amp; DİRENÇ MİMARİSİ", tg_msg)
         self.assertIn("PARA GİRİŞ / ÇIKIŞI &amp; BALİNALAR", tg_msg)
-        self.assertIn("MIKNATIS &amp; LİKİDASYON SEVİYELERİ", tg_msg)
+        self.assertIn("MIKNATIS (POC) &amp; TASFİYE BÖLGELERİ", tg_msg)
         self.assertIn("VADELİ İŞLEM RADARI", tg_msg)
         self.assertIn("Son 20 Mum Nakit", tg_msg)
         self.assertIn("Dip Alıcı Maliyeti", tg_msg)

@@ -896,7 +896,14 @@ class InteractiveChartVisualizer:
                 )
 
             if show_sr_zones:
-                for idx_s, sup in enumerate(fc.support_levels, start=1):
+                for idx_s, sup in enumerate(fc.support_levels[:2], start=1):
+                    is_str_s = bool(getattr(sup, "is_strong", False))
+                    s_score_v = float(getattr(sup, "strength_score", 45.0))
+                    s_tier = f"{idx_s}. 🛡️ Güçlü Destek" if is_str_s else f"{idx_s}. 🟢 Destek"
+                    s_reasons = getattr(sup, "confluence_tags", []) or []
+                    s_reason_short = f" • {s_reasons[0]}" if s_reasons else ""
+                    s_stats_tr = getattr(sup, "stats_summary_tr", "")
+                    s_stats_short = f" • {s_stats_tr.split('•')[0].strip()}" if s_stats_tr else ""
                     shapes_for_tf.append(
                         dict(
                             type="rect",
@@ -906,8 +913,29 @@ class InteractiveChartVisualizer:
                             x1=0.84,
                             y0=sup.band_low,
                             y1=sup.band_high,
-                            fillcolor="rgba(0, 230, 118, 0.055)",
-                            line=dict(color="rgba(0, 230, 118, 0.38)", width=1.0, dash="dot"),
+                            fillcolor="rgba(0, 230, 118, 0.105)" if is_str_s else "rgba(0, 230, 118, 0.048)",
+                            line=dict(
+                                color="rgba(0, 230, 118, 0.45)" if is_str_s else "rgba(0, 230, 118, 0.25)",
+                                width=1.0,
+                                dash="solid" if is_str_s else "dot",
+                            ),
+                        )
+                    )
+                    # Crisp center line anchored directly to the candle pivot price
+                    shapes_for_tf.append(
+                        dict(
+                            type="line",
+                            xref="paper",
+                            yref="y",
+                            x0=0,
+                            x1=0.84,
+                            y0=sup.price,
+                            y1=sup.price,
+                            line=dict(
+                                color="rgba(0, 230, 118, 0.85)" if is_str_s else "rgba(0, 230, 118, 0.55)",
+                                width=1.6 if is_str_s else 1.1,
+                                dash="solid" if is_str_s else "dash",
+                            ),
                         )
                     )
                     ann_for_tf.append(
@@ -918,17 +946,24 @@ class InteractiveChartVisualizer:
                             y=sup.price,
                             xanchor="left",
                             yanchor="middle",
-                            text=f"<b>🟢 Destek {idx_s}: {format(sup.price, p_fmt)}</b>",
+                            text=f"<b>{s_tier} ({s_score_v:.0f}/100{s_reason_short}{s_stats_short}): {format(sup.price, p_fmt)}</b>",
                             showarrow=False,
                             font=dict(size=10.5, color="#00E676"),
-                            bgcolor="rgba(11, 15, 25, 0.88)",
-                            bordercolor="rgba(0, 230, 118, 0.45)",
+                            bgcolor="rgba(11, 15, 25, 0.92)",
+                            bordercolor="rgba(0, 230, 118, 0.72)" if is_str_s else "rgba(0, 230, 118, 0.42)",
                             borderwidth=1,
                             borderpad=2,
                         )
                     )
 
-                for idx_r, res in enumerate(fc.resistance_levels, start=1):
+                for idx_r, res in enumerate(fc.resistance_levels[:2], start=1):
+                    is_str_r = bool(getattr(res, "is_strong", False))
+                    r_score_v = float(getattr(res, "strength_score", 45.0))
+                    r_tier = f"{idx_r}. 🧱 Güçlü Direnç" if is_str_r else f"{idx_r}. 🔴 Direnç"
+                    r_reasons = getattr(res, "confluence_tags", []) or []
+                    r_reason_short = f" • {r_reasons[0]}" if r_reasons else ""
+                    r_stats_tr = getattr(res, "stats_summary_tr", "")
+                    r_stats_short = f" • {r_stats_tr.split('•')[0].strip()}" if r_stats_tr else ""
                     shapes_for_tf.append(
                         dict(
                             type="rect",
@@ -938,8 +973,29 @@ class InteractiveChartVisualizer:
                             x1=0.84,
                             y0=res.band_low,
                             y1=res.band_high,
-                            fillcolor="rgba(255, 82, 82, 0.055)",
-                            line=dict(color="rgba(255, 82, 82, 0.38)", width=1.0, dash="dot"),
+                            fillcolor="rgba(255, 82, 82, 0.105)" if is_str_r else "rgba(255, 82, 82, 0.048)",
+                            line=dict(
+                                color="rgba(255, 82, 82, 0.45)" if is_str_r else "rgba(255, 82, 82, 0.25)",
+                                width=1.0,
+                                dash="solid" if is_str_r else "dot",
+                            ),
+                        )
+                    )
+                    # Crisp center line anchored directly to the candle pivot price
+                    shapes_for_tf.append(
+                        dict(
+                            type="line",
+                            xref="paper",
+                            yref="y",
+                            x0=0,
+                            x1=0.84,
+                            y0=res.price,
+                            y1=res.price,
+                            line=dict(
+                                color="rgba(255, 82, 82, 0.85)" if is_str_r else "rgba(255, 82, 82, 0.55)",
+                                width=1.6 if is_str_r else 1.1,
+                                dash="solid" if is_str_r else "dash",
+                            ),
                         )
                     )
                     ann_for_tf.append(
@@ -950,11 +1006,67 @@ class InteractiveChartVisualizer:
                             y=res.price,
                             xanchor="left",
                             yanchor="middle",
-                            text=f"<b>🔴 Direnç {idx_r}: {format(res.price, p_fmt)}</b>",
+                            text=f"<b>{r_tier} ({r_score_v:.0f}/100{r_reason_short}{r_stats_short}): {format(res.price, p_fmt)}</b>",
                             showarrow=False,
                             font=dict(size=10.5, color="#FF5252"),
-                            bgcolor="rgba(11, 15, 25, 0.88)",
-                            bordercolor="rgba(255, 82, 82, 0.45)",
+                            bgcolor="rgba(11, 15, 25, 0.92)",
+                            bordercolor="rgba(255, 82, 82, 0.72)" if is_str_r else "rgba(255, 82, 82, 0.42)",
+                            borderwidth=1,
+                            borderpad=2,
+                        )
+                    )
+
+                # Dynamic Trendlines (Ascending Support & Descending Resistance) + Retest/SFP Marker
+                tl_obj = getattr(fc, "trendlines", None)
+                if tl_obj is not None and len(df) >= 5:
+                    if getattr(tl_obj, "has_support_line", False) and tl_obj.sup_x0 is not None and tl_obj.sup_x1 is not None and tl_obj.sup_y1 > 0:
+                        shapes_for_tf.append(
+                            dict(
+                                type="line",
+                                xref="x",
+                                yref="y",
+                                x0=tl_obj.sup_x0,
+                                y0=tl_obj.sup_y0,
+                                x1=tl_obj.sup_x1,
+                                y1=tl_obj.sup_y1,
+                                line=dict(color="rgba(16, 185, 129, 0.85)", width=1.8, dash="dashdot"),
+                            )
+                        )
+                    if getattr(tl_obj, "has_resistance_line", False) and tl_obj.res_x0 is not None and tl_obj.res_x1 is not None and tl_obj.res_y1 > 0:
+                        shapes_for_tf.append(
+                            dict(
+                                type="line",
+                                xref="x",
+                                yref="y",
+                                x0=tl_obj.res_x0,
+                                y0=tl_obj.res_y0,
+                                x1=tl_obj.res_x1,
+                                y1=tl_obj.res_y1,
+                                line=dict(color="rgba(244, 63, 94, 0.85)", width=1.8, dash="dashdot"),
+                            )
+                        )
+                sr_act_t = getattr(fc, "sr_action_type", "NONE")
+                sr_act_p = float(getattr(fc, "sr_action_price", 0.0) or 0.0)
+                if sr_act_t != "NONE" and sr_act_p > 0:
+                    is_bull_act = "BULL" in sr_act_t
+                    act_lbl = "🪤 Dip SFP (Tuzak)" if sr_act_t == "BULL_SFP" else (
+                        "🪤 Tepe SFP (Tuzak)" if sr_act_t == "BEAR_SFP" else (
+                            "🔄 Yukarı Retest Onayı" if sr_act_t == "BULL_RETEST" else "🔄 Aşağı Retest Onayı"
+                        )
+                    )
+                    ann_for_tf.append(
+                        dict(
+                            xref="paper",
+                            yref="y",
+                            x=0.52,
+                            y=sr_act_p,
+                            xanchor="center",
+                            yanchor="bottom" if is_bull_act else "top",
+                            text=f"<b>{act_lbl}: {format(sr_act_p, p_fmt)}</b>",
+                            showarrow=False,
+                            font=dict(size=10.5, color="#38BDF8" if is_bull_act else "#F59E0B"),
+                            bgcolor="rgba(15, 23, 42, 0.92)",
+                            bordercolor="#38BDF8" if is_bull_act else "#F59E0B",
                             borderwidth=1,
                             borderpad=2,
                         )

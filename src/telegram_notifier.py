@@ -31,15 +31,42 @@ PID_FILE = ROOT_DIR / "telegram_bot.pid"
 # ===========================================================================
 # 1. CONFIG & PERSISTENT STATE MANAGEMENT (ALARMS, RADAR, COOLDOWNS)
 # ===========================================================================
+def _clean_bot_token(raw: str) -> str:
+    """Sanitizes user-pasted bot token (strips quotes, TOML key prefixes, whitespace, and leading 'bot')."""
+    s = str(raw or "").strip()
+    if "=" in s:
+        s = s.split("=", 1)[1].strip()
+    s = s.strip("\"'` \t\r\n")
+    if s.lower().startswith("bot") and ":" in s and s[3:4].isdigit():
+        s = s[3:]
+    return s.strip()
+
+
+def _clean_chat_id(raw: str) -> str:
+    """Sanitizes user-pasted chat ID (strips quotes, TOML key prefixes, and whitespace)."""
+    s = str(raw or "").strip()
+    if "=" in s:
+        s = s.split("=", 1)[1].strip()
+    return s.strip("\"'` \t\r\n")
+
+
 def load_telegram_config() -> Dict[str, str]:
-    """Loads saved Telegram bot_token and chat_id from local JSON file or environment variables."""
-    env_tok = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    env_cid = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    """Loads saved Telegram bot_token and chat_id from local JSON file, Streamlit secrets, or environment variables."""
+    env_tok = _clean_bot_token(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+    env_cid = _clean_chat_id(os.environ.get("TELEGRAM_CHAT_ID", ""))
+    if not env_tok or not env_cid:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets"):
+                env_tok = env_tok or _clean_bot_token(st.secrets.get("TELEGRAM_BOT_TOKEN", ""))
+                env_cid = env_cid or _clean_chat_id(st.secrets.get("TELEGRAM_CHAT_ID", ""))
+        except Exception:
+            pass
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            tok = str(data.get("bot_token", "")).strip() or env_tok
-            cid = str(data.get("chat_id", "")).strip() or env_cid
+            tok = _clean_bot_token(data.get("bot_token", "")) or env_tok
+            cid = _clean_chat_id(data.get("chat_id", "")) or env_cid
             return {"bot_token": tok, "chat_id": cid}
         except Exception:
             pass
@@ -51,7 +78,7 @@ def save_telegram_config(bot_token: str, chat_id: str) -> bool:
     try:
         CONFIG_FILE.write_text(
             json.dumps(
-                {"bot_token": bot_token.strip(), "chat_id": chat_id.strip()},
+                {"bot_token": _clean_bot_token(bot_token), "chat_id": _clean_chat_id(chat_id)},
                 indent=2,
                 ensure_ascii=False,
             ),
@@ -64,6 +91,7 @@ def save_telegram_config(bot_token: str, chat_id: str) -> bool:
 
 def _default_state() -> Dict[str, Any]:
     return {
+        "primary_exchange": "binance",
         "radar_enabled": True,
         "radar_interval_sec": 600,  # 10 minutes
         "auto_session_summary": True,
@@ -104,6 +132,7 @@ def add_price_alarm(
     target_price: float,
     current_price: float,
     note: str = "",
+    chat_id: str = "",
 ) -> Dict[str, Any]:
     """Adds a personal price alarm and persists it to telegram_state.json."""
     state = load_telegram_state()
@@ -117,6 +146,7 @@ def add_price_alarm(
         "ref_price": float(current_price),
         "direction": direction,
         "note": note or ("Üstüne Çıkarsa 📈" if direction == "ABOVE" else "Altına İnerse 📉"),
+        "chat_id": str(chat_id).strip(),
         "created_at": time.strftime("%Y-%m-%d %H:%M"),
     }
     alarms.append(entry)
@@ -172,24 +202,33 @@ def start_bot_background() -> Tuple[bool, str]:
         return True, f"🟢 Telegram Botu zaten arka planda çalışıyor (PID: {pid})."
     bot_script = ROOT_DIR / "telegram_bot.py"
     try:
-        flags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        proc = subprocess.Popen(
-            [sys.executable, str(bot_script)],
-            cwd=str(ROOT_DIR),
-            env=env,
-            creationflags=flags,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
+        cfg = load_telegram_config()
+        if cfg.get("bot_token"):
+            env["TELEGRAM_BOT_TOKEN"] = cfg["bot_token"]
+        if cfg.get("chat_id"):
+            env["TELEGRAM_CHAT_ID"] = cfg["chat_id"]
+
+        popen_kwargs: Dict[str, Any] = {
+            "cwd": str(ROOT_DIR),
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen([sys.executable, str(bot_script)], **popen_kwargs)
         PID_FILE.write_text(str(proc.pid), encoding="utf-8")
         return True, f"🤖 7/24 İnteraktif Telegram Botu ve Radar başlatıldı (PID: {proc.pid})!"
     except Exception as e:
@@ -603,10 +642,36 @@ def format_forecast_telegram_html(
     # Card 2: DESTEK, DİRENÇ & HEDEFLER
     sup_str = _p(fc.nearest_support)
     res_str = _p(fc.nearest_resistance)
-    sup2_val = fc.support_levels[1].price if len(fc.support_levels) > 1 else None
-    res2_val = fc.resistance_levels[1].price if len(fc.resistance_levels) > 1 else None
-    sup2_str = f" <i>(2. Destek: {_p(sup2_val)})</i>" if sup2_val else ""
-    res2_str = f" <i>(2. Direnç: {_p(res2_val)})</i>" if res2_val else ""
+    sup1_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Destek")
+    sup1_score = getattr(fc, "nearest_support_score", 0.0)
+    sup1_reason = getattr(fc, "nearest_support_reason_tr", "")
+    res1_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res1_score = getattr(fc, "nearest_resistance_score", 0.0)
+    res1_reason = getattr(fc, "nearest_resistance_reason_tr", "")
+
+    s1_stats = getattr(fc.support_levels[0], "stats_summary_tr", "") if fc.support_levels else ""
+    r1_stats = getattr(fc.resistance_levels[0], "stats_summary_tr", "") if fc.resistance_levels else ""
+
+    sup1_meta = f" <i>({sup1_score:.0f}/100{f' · {sup1_reason}' if sup1_reason else ''}{f' · {s1_stats}' if s1_stats else ''})</i>" if sup1_score > 0 else ""
+    res1_meta = f" <i>({res1_score:.0f}/100{f' · {res1_reason}' if res1_reason else ''}{f' · {r1_stats}' if r1_stats else ''})</i>" if res1_score > 0 else ""
+
+    if len(fc.support_levels) > 1:
+        s2_obj = fc.support_levels[1]
+        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Destek")
+        s2_sc = getattr(s2_obj, "strength_score", 0.0)
+        s2_st = getattr(s2_obj, "stats_summary_tr", "")
+        sup2_line = f"\n• ↳ <b>2. {s2_tier}:</b> <code>{_p(s2_obj.price)}</code> <i>({s2_sc:.0f}/100{f' · {s2_st}' if s2_st else ''})</i>"
+    else:
+        sup2_line = ""
+
+    if len(fc.resistance_levels) > 1:
+        r2_obj = fc.resistance_levels[1]
+        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Direnç")
+        r2_sc = getattr(r2_obj, "strength_score", 0.0)
+        r2_st = getattr(r2_obj, "stats_summary_tr", "")
+        res2_line = f"\n• ↳ <b>2. {r2_tier}:</b> <code>{_p(r2_obj.price)}</code> <i>({r2_sc:.0f}/100{f' · {r2_st}' if r2_st else ''})</i>"
+    else:
+        res2_line = ""
 
     tp1_disp = fc.tp1_price if fc.tp1_price > 0 else fc.bullish_target_price
     tp2_disp = fc.tp2_price if fc.tp2_price > 0 else fc.bullish_target_price
@@ -687,22 +752,34 @@ def format_forecast_telegram_html(
             f"• ⚠️ <b>Sebep:</b> <i>{reason_short}</i>",
         ]
 
+    if fs and fs.is_tradeable:
+        c2_extra_line = f"• 🎯 <b>Onaylı Hedef ({fs.direction}):</b> <code>{_p(fs.tp1_price)}</code> ➔ <code>{_p(fs.tp2_price)}</code> | 🛡️ <b>Stop:</b> <code>{_p(fs.stop_price)}</code>"
+    else:
+        ch_w_pct = abs((fc.nearest_resistance or current_price) - (fc.nearest_support or current_price)) / max(current_price, 1e-9) * 100.0
+        c2_extra_line = f"• 📐 <b>Kanal Genişliği:</b> %{ch_w_pct:.2f} <i>(Risk Kalkanı Aktif: Kırılım Öncesi TP/Stop Önerilmez)</i>"
+
+    tl_rep = getattr(fc, "trendlines", None)
+    tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
+    sr_act_type = getattr(fc, "sr_action_type", "NONE")
+    sr_act_str = getattr(fc, "sr_action_status_tr", "")
+    breakout_tg_line = f"• <b>Seviye Onayı / Tuzak:</b> <b>{sr_act_str}</b>" if (sr_act_type != "NONE" and sr_act_str) else f"• <b>Kırılım İzi:</b> {breakout_text}"
+    tl_tg_line = f"\n• <b>Dinamik Kanal:</b> {tl_summary}" if tl_summary else ""
+
     lines.extend(
         [
             "",
             f"1️⃣ <b>MEVCUT TREND &amp; KIRILIMLAR ({tf_up})</b>",
             f"• <b>Mevcut Trend:</b> {trend_title}",
-            f"• <b>Kırılım İzi:</b> {breakout_text}",
+            breakout_tg_line + tl_tg_line,
             f"• <b>Sıkışma Durumu:</b> {squeeze_short}",
             f"• <b>Yukarı Kırılım Eşiği:</b> <code>{_p(up_break_price)}</code> üstü",
             f"• <b>Aşağı Kırılım Eşiği:</b> <code>{_p(down_break_price)}</code> altı",
             "",
-            "2️⃣ <b>DESTEK, DİRENÇ &amp; HEDEFLER</b>",
+            "2️⃣ <b>DESTEK &amp; DİRENÇ MİMARİSİ</b>",
             f"• 💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code>",
-            f"• 🟢 <b>Destek (Taban):</b> <code>{sup_str}</code>{sup2_str}",
-            f"• 🔴 <b>Direnç (Tavan):</b> <code>{res_str}</code>{res2_str}",
-            f"• 🎯 <b>{dir_label_tr}:</b> <code>{_p(tp1_disp)}</code> ➔ <code>{_p(tp2_disp)}</code>",
-            f"• 🛡️ <b>Zarar-Kes (Stop):</b> <code>{_p(stop_disp)}</code>",
+            f"• <b>{sup1_tier}:</b> <code>{sup_str}</code>{sup1_meta}{sup2_line}",
+            f"• <b>{res1_tier}:</b> <code>{res_str}</code>{res1_meta}{res2_line}",
+            c2_extra_line,
             "",
             "3️⃣ <b>PARA GİRİŞ / ÇIKIŞI &amp; BALİNALAR</b>",
             f"• 💸 <b>Durum:</b> <b>{mf_headline}</b>",
@@ -711,12 +788,12 @@ def format_forecast_telegram_html(
             f"• 📘 <b>Bekleyen Emirler:</b> %{fc.ob_imbalance_pct:.0f} Alıcı / %{100 - fc.ob_imbalance_pct:.0f} Satıcı",
             f"• 🧱 <b>Duvarlar:</b> Alış <code>{bid_wall_str}</code> | Satış <code>{ask_wall_str}</code>",
             "",
-            "4️⃣ <b>MIKNATIS &amp; LİKİDASYON SEVİYELERİ</b>",
+            "4️⃣ <b>MIKNATIS (POC) &amp; TASFİYE BÖLGELERİ</b>",
             f"• 🧲 <b>Mıknatıs:</b> <code>{poc_str}</code>",
             f"• 🟡 <b>En Yoğun Fiyat (POC):</b> {poc_relation}",
-            f"• ⚓ <b>Dip Alıcı Maliyeti:</b> <code>{avwap_low_str}</code>",
-            f"• ⬆️ <b>Yukarı Likidasyon (Short):</b> {short_liq_str}",
-            f"• ⬇️ <b>Aşağı Likidasyon (Long):</b> {long_liq_str}",
+            f"• ⚓ <b>Dip Alıcı Maliyeti (AVWAP):</b> <code>{avwap_low_str}</code>",
+            f"• ⬆️ <b>Tahmini Short Tasfiye (25x-50x):</b> {short_liq_str}",
+            f"• ⬇️ <b>Tahmini Long Tasfiye (25x-50x):</b> {long_liq_str}",
         ]
         + fut_summary_block
         + [
@@ -746,12 +823,18 @@ def format_futures_setup_telegram_html(
     fs = fc.futures_setup
     sup_str = _p(fc.nearest_support)
     res_str = _p(fc.nearest_resistance)
+    sup_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Destek")
+    sup_sc = getattr(fc, "nearest_support_score", 0.0)
+    res_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res_sc = getattr(fc, "nearest_resistance_score", 0.0)
+    sup_sc_tag = f" ({sup_sc:.0f}/100)" if sup_sc > 0 else ""
+    res_sc_tag = f" ({res_sc:.0f}/100)" if res_sc > 0 else ""
 
     lines = [
         f"⚡ <b>{symbol} ({tf_up}) VADELİ İŞLEMLER (FUTURES) KURULUM &amp; GÜVEN RADARI</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"💰 <b>Anlık Fiyat:</b> <code>{_p(current_price)} USDT</code> | 🕒 <i>{now_hm}</i>",
-        f"🧱 <b>Ana Destek (Taban):</b> <code>{sup_str}</code> | <b>Ana Direnç (Tavan):</b> <code>{res_str}</code>",
+        f"• <b>{sup_tier}{sup_sc_tag}:</b> <code>{sup_str}</code> | <b>{res_tier}{res_sc_tag}:</b> <code>{res_str}</code>",
         f"🎖️ <b>Vadeli Güven Notu:</b> <b>{fs.confidence_score:.0f}/100 (Sınıf: {fs.confidence_grade})</b>",
         f"🧭 <b>Radar Kararı:</b> <b>{fs.direction_label_tr}</b>",
     ]
@@ -808,6 +891,7 @@ def format_futures_setup_telegram_html(
             "",
             "🔬 <b>VADELİ TEKNİK &amp; KURUMSAL ONAYLAR</b>",
             f"• 📡 <b>Vadeli Mikro-Yapı:</b> {fs.futures_tech_summary_tr}",
+            f"• ⚡ <b>Kaldıraç Sıkıştırma:</b> {getattr(fs, 'leverage_squeeze_status_tr', '') or getattr(fc, 'leverage_squeeze_status_tr', '⚖️ Dengeli')}",
         ]
     )
     for pf in fs.positive_factors_tr[:4]:
@@ -1196,12 +1280,45 @@ def generate_telegram_chart_png(
                 zorder=6,
             )
 
-        _draw_level(fc.nearest_support, "#00E676", "Destek", "--")
-        _draw_level(fc.nearest_resistance, "#FF5252", "Direnç", "--")
+        for idx_s, sup in enumerate(getattr(fc, "support_levels", [])[:2], start=1):
+            if y_lo <= sup.price <= y_hi:
+                is_str_s = bool(getattr(sup, "is_strong", False))
+                s_sc = float(getattr(sup, "strength_score", 45.0))
+                ax1.axhspan(
+                    max(sup.band_low, y_lo),
+                    min(sup.band_high, y_hi),
+                    color="#00E676",
+                    alpha=0.11 if is_str_s else 0.055,
+                    zorder=2,
+                )
+                s_lbl = f"{idx_s}. Güçlü Destek ({s_sc:.0f}p)" if is_str_s else f"{idx_s}. Destek ({s_sc:.0f}p)"
+                _draw_level(sup.price, "#00E676", s_lbl, "-" if is_str_s else "--")
+        if not getattr(fc, "support_levels", None):
+            sup_chart_lbl = "Güçlü Destek" if getattr(fc, "nearest_support_score", 0.0) >= 58.0 else "Destek"
+            _draw_level(fc.nearest_support, "#00E676", sup_chart_lbl, "-" if sup_chart_lbl == "Güçlü Destek" else "--")
+
+        for idx_r, res in enumerate(getattr(fc, "resistance_levels", [])[:2], start=1):
+            if y_lo <= res.price <= y_hi:
+                is_str_r = bool(getattr(res, "is_strong", False))
+                r_sc = float(getattr(res, "strength_score", 45.0))
+                ax1.axhspan(
+                    max(res.band_low, y_lo),
+                    min(res.band_high, y_hi),
+                    color="#FF5252",
+                    alpha=0.11 if is_str_r else 0.055,
+                    zorder=2,
+                )
+                r_lbl = f"{idx_r}. Güçlü Direnç ({r_sc:.0f}p)" if is_str_r else f"{idx_r}. Direnç ({r_sc:.0f}p)"
+                _draw_level(res.price, "#FF5252", r_lbl, "-" if is_str_r else "--")
+        if not getattr(fc, "resistance_levels", None):
+            res_chart_lbl = "Güçlü Direnç" if getattr(fc, "nearest_resistance_score", 0.0) >= 58.0 else "Direnç"
+            _draw_level(fc.nearest_resistance, "#FF5252", res_chart_lbl, "-" if res_chart_lbl == "Güçlü Direnç" else "--")
+
         _draw_level(fc.poc_price, "#FACC15", "Mıknatıs (POC)", "-.")
-        _draw_level(fc.tp1_price, "#38BDF8", "Hedef 1 (TP1)", ":")
-        _draw_level(fc.tp2_price, "#10B981", "Hedef 2 (TP2)", ":")
-        _draw_level(fc.stop_price, "#FB7185", "Zarar-Kes (Stop)", ":")
+        if getattr(fc, "futures_setup", None) and fc.futures_setup.is_tradeable:
+            _draw_level(fc.futures_setup.tp1_price, "#38BDF8", "Hedef 1 (TP1)", ":")
+            _draw_level(fc.futures_setup.tp2_price, "#10B981", "Hedef 2 (TP2)", ":")
+            _draw_level(fc.futures_setup.stop_price, "#FB7185", "Zarar-Kes (Stop)", ":")
 
         ax1.set_xlim(-1.5, len(plot_df) + 14)
         ax1.set_ylim(y_lo, y_hi)
@@ -1260,8 +1377,8 @@ def send_telegram_message(
     Sends an HTML-formatted message via Telegram Bot API with optional Inline/Reply Keyboard.
     Returns (success, status_message_tr).
     """
-    token = (bot_token or "").strip()
-    cid = (chat_id or "").strip()
+    token = _clean_bot_token(bot_token)
+    cid = _clean_chat_id(chat_id)
     if not token or not cid:
         return False, "Lütfen geçerli bir Telegram Bot Token ve Chat ID girin."
 
@@ -1289,6 +1406,12 @@ def send_telegram_message(
             desc = err_body.get("description", str(e))
         except Exception:
             desc = str(e)
+        if e.code == 401:
+            return (
+                False,
+                "❌ Telegram HTTP 401 (Yetkisiz/Geçersiz Token): Girilen Bot Token şu an geçersiz veya @BotFather tarafından iptal edilmiş (Revoked). "
+                "Lütfen Telegram'da @BotFather'a gidip /token komutuyla güncel Token'ınızı alın ve sol menüye yapıştırıp Kaydet'e basın.",
+            )
         return False, f"❌ Telegram HTTP Hatası ({e.code}): {desc}"
     except Exception as e:
         return False, f"❌ Bağlantı Hatası: {e}"

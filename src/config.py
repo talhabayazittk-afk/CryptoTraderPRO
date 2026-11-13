@@ -10,7 +10,9 @@ from typing import List
 class ExchangeConfig:
     """Settings for CCXT exchange data retrieval (Spot + Futures + OrderBook)."""
     primary_exchange: str = "binance"
-    fallback_exchanges: List[str] = field(default_factory=lambda: ["bybit", "okx", "kraken"])
+    fallback_exchanges: List[str] = field(
+        default_factory=lambda: ["gate", "kucoin", "kraken", "coinbase", "cryptocom", "okx", "bybit"]
+    )
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
     limit: int = 200

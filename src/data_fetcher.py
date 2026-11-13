@@ -10,9 +10,12 @@ Features:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import threading
-from typing import Dict, List, Optional, Tuple
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt
 import numpy as np
@@ -21,6 +24,23 @@ import pandas as pd
 from .config import ExchangeConfig
 
 logger = logging.getLogger(__name__)
+
+_BINANCE_VISION_BASE = "https://data-api.binance.vision/api/v3"
+
+
+def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: float = 6.0) -> Any:
+    """Direct lightweight HTTP GET helper with browser User-Agent (bypasses US geo-blocks on data-api.binance.vision)."""
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 @dataclass
@@ -85,11 +105,16 @@ class CryptoDataFetcher:
             exchange_class = getattr(ccxt, ex_key, None)
             if exchange_class is None:
                 raise ValueError(f"Desteklenmeyen borsa ID: {exchange_id}")
-            spot_clients[ex_key] = exchange_class({
+            cfg_opts = {
                 "enableRateLimit": False,
                 "timeout": self.config.timeout_ms,
                 "options": {"defaultType": "spot"},
-            })
+            }
+            if ex_key == "binance":
+                # Use Binance's official global market-data mirror so US-hosted cloud servers (e.g. streamlit.app)
+                # never hit HTTP 451 geo-restrictions while still getting exact Binance Spot klines/CVD/depth.
+                cfg_opts["urls"] = {"api": {"public": "https://data-api.binance.vision/api/v3"}}
+            spot_clients[ex_key] = exchange_class(cfg_opts)
         return spot_clients[ex_key]
 
     def _get_swap_exchange(self, exchange_id: str) -> ccxt.Exchange:
@@ -108,6 +133,105 @@ class CryptoDataFetcher:
                 "options": {"defaultType": "swap"},
             })
         return swap_clients[ex_key]
+
+    def _fetch_direct_ohlcv(
+        self,
+        ex_id: str,
+        target_symbol: str,
+        target_tf: str,
+        target_limit: int,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Ultra-fast direct HTTP REST kline fetcher for Binance (Global Vision), OKX, Bybit, KuCoin, and Gate.io.
+        Completely bypasses CCXT `load_markets()` (which otherwise downloads 3,000+ symbols per thread).
+        """
+        ex = ex_id.lower()
+        parts = target_symbol.replace(":USDT", "").split("/")
+        base = parts[0].upper() if parts else "BTC"
+        quote = parts[1].upper() if len(parts) > 1 else "USDT"
+        tf_low = target_tf.lower()
+
+        if ex == "binance":
+            market_id = f"{base}{quote}"
+            raw_klines = _http_get_json(
+                f"{_BINANCE_VISION_BASE}/klines",
+                {"symbol": market_id, "interval": tf_low, "limit": target_limit},
+                timeout=4.5,
+            )
+            if raw_klines and len(raw_klines) > 0:
+                return self._normalize_binance_klines(raw_klines, tf_low)
+
+        elif ex == "okx":
+            bar_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1Dutc"}
+            bar = bar_map.get(tf_low, "1H")
+            res = _http_get_json(
+                "https://www.okx.com/api/v5/market/candles",
+                {"instId": f"{base}-{quote}", "bar": bar, "limit": min(target_limit, 300)},
+                timeout=4.5,
+            )
+            data = res.get("data", []) if isinstance(res, dict) else []
+            if data:
+                rows = [
+                    [int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])]
+                    for r in reversed(data)
+                ]
+                return self._normalize_dataframe(rows, tf_low)
+
+        elif ex == "bybit":
+            iv_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+            iv = iv_map.get(tf_low, "60")
+            for dom in ("https://api.bytick.com", "https://api.bybit.com"):
+                try:
+                    res = _http_get_json(
+                        f"{dom}/v5/market/kline",
+                        {"category": "spot", "symbol": f"{base}{quote}", "interval": iv, "limit": min(target_limit, 200)},
+                        timeout=3.5,
+                    )
+                    lst = res.get("result", {}).get("list", []) if isinstance(res, dict) else []
+                    if lst:
+                        rows = [
+                            [int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])]
+                            for r in reversed(lst)
+                        ]
+                        return self._normalize_dataframe(rows, tf_low)
+                except Exception:
+                    continue
+
+        elif ex == "kucoin":
+            type_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day"}
+            k_type = type_map.get(tf_low, "1hour")
+            res = _http_get_json(
+                "https://api.kucoin.com/api/v1/market/candles",
+                {"type": k_type, "symbol": f"{base}-{quote}"},
+                timeout=4.5,
+            )
+            data = res.get("data", []) if isinstance(res, dict) else []
+            if data:
+                # KuCoin returns newest first: [time_sec, open, close, high, low, volume, turnover]
+                sliced = data[:target_limit]
+                rows = [
+                    [int(r[0]) * 1000, float(r[1]), float(r[3]), float(r[4]), float(r[2]), float(r[5])]
+                    for r in reversed(sliced)
+                ]
+                return self._normalize_dataframe(rows, tf_low)
+
+        elif ex == "gate":
+            iv_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+            iv = iv_map.get(tf_low, "1h")
+            res = _http_get_json(
+                "https://api.gateio.ws/api/v4/spot/candlesticks",
+                {"currency_pair": f"{base}_{quote}", "interval": iv, "limit": min(target_limit, 500)},
+                timeout=4.5,
+            )
+            if isinstance(res, list) and len(res) > 0:
+                # Gate returns oldest first: [ts_sec, quote_vol, close, high, low, open, base_vol, is_closed]
+                rows = [
+                    [int(float(r[0])) * 1000, float(r[5]), float(r[3]), float(r[4]), float(r[2]), float(r[6])]
+                    for r in res
+                ]
+                return self._normalize_dataframe(rows, tf_low)
+
+        return None
 
     def fetch_ohlcv(
         self,
@@ -130,38 +254,43 @@ class CryptoDataFetcher:
             exchanges_to_try.append(exchange_id)
         else:
             exchanges_to_try.append(self.config.primary_exchange)
-            for fb in self.config.fallback_exchanges:
-                if fb not in exchanges_to_try:
-                    exchanges_to_try.append(fb)
+        for fb in self.config.fallback_exchanges:
+            if fb not in exchanges_to_try:
+                exchanges_to_try.append(fb)
 
         last_error: Optional[Exception] = None
 
         for ex_id in exchanges_to_try:
             try:
+                # 1. Ultra-fast Direct REST API path (no CCXT load_markets overhead)
+                try:
+                    direct_df = self._fetch_direct_ohlcv(ex_id, target_symbol, target_tf, target_limit)
+                    if direct_df is not None and len(direct_df) > 0:
+                        return direct_df, ex_id.upper()
+                except Exception as dir_exc:
+                    logger.debug(f"[{ex_id.upper()}] Direct REST kline fallback: {dir_exc}")
+
+                # 2. CCXT Fallback path (e.g. Kraken, Coinbase)
                 exchange = self._get_spot_exchange(ex_id)
+                candidate_symbols = [target_symbol]
+                if target_symbol.endswith("/USDT"):
+                    candidate_symbols.append(target_symbol.replace("/USDT", "/USD"))
 
-                # If Binance, attempt raw klines first to get exact Taker Buy Base/Quote Volume
-                if ex_id.lower() == "binance":
+                raw_ohlcv = None
+                for cand_sym in candidate_symbols:
                     try:
-                        market_id = target_symbol.replace("/", "").replace(":USDT", "")
-                        raw_klines = exchange.publicGetKlines({
-                            "symbol": market_id,
-                            "interval": target_tf,
-                            "limit": target_limit,
-                        })
-                        if raw_klines and len(raw_klines) > 0:
-                            df = self._normalize_binance_klines(raw_klines, target_tf)
-                            return df, "BINANCE"
-                    except Exception as bin_exc:
-                        logger.debug(f"Binance raw kline fallback: {bin_exc}")
+                        raw_ohlcv = exchange.fetch_ohlcv(
+                            symbol=cand_sym,
+                            timeframe=target_tf,
+                            limit=target_limit,
+                        )
+                        if raw_ohlcv and len(raw_ohlcv) > 0:
+                            break
+                    except Exception:
+                        continue
 
-                raw_ohlcv = exchange.fetch_ohlcv(
-                    symbol=target_symbol,
-                    timeframe=target_tf,
-                    limit=target_limit,
-                )
                 if not raw_ohlcv or len(raw_ohlcv) == 0:
-                    raise RuntimeError(f"{ex_id} boş OHLCV verisi döndürdü.")
+                    raise RuntimeError(f"{ex_id} boş OHLCV verisi döndürdü ({target_symbol}).")
 
                 df = self._normalize_dataframe(raw_ohlcv, target_tf)
                 return df, ex_id.upper()
@@ -225,177 +354,253 @@ class CryptoDataFetcher:
         """
         target_symbol = symbol or self.config.symbol
         ex_id = (exchange_id or self.config.primary_exchange).lower()
+        parts = target_symbol.replace(":USDT", "").split("/")
+        base_ccy = parts[0].upper() if parts else "BTC"
+        quote_ccy = parts[1].upper() if len(parts) > 1 else "USDT"
+        raw_sym = f"{base_ccy}{quote_ccy}"
 
         intel = OrderFlowIntel(symbol=target_symbol, exchange=ex_id.upper())
 
-        # 1. Deep Spot Order Book & 24h Ticker
-        try:
-            spot = self._get_spot_exchange(ex_id)
-            raw_sym = target_symbol.replace("/", "").replace(":USDT", "")
-            depth_limit = 500 if ex_id == "binance" else 100
-            if ex_id == "binance":
-                ob = spot.publicGetDepth({"symbol": raw_sym, "limit": depth_limit})
-            else:
-                ob = spot.fetch_order_book(target_symbol, limit=depth_limit)
-            bids = ob.get("bids", [])
-            asks = ob.get("asks", [])
+        # 1. Deep Spot Order Book & 24h Ticker (Direct HTTP REST for binance, okx, bybit, kucoin, gate)
+        spot_exchanges_to_try = [ex_id] + [fb for fb in ("binance", "okx", "gate", "kucoin", "bybit", "kraken", "coinbase") if fb != ex_id]
+        for s_ex in spot_exchanges_to_try:
+            try:
+                bids: list = []
+                asks: list = []
+                if s_ex == "binance":
+                    ob = _http_get_json(f"{_BINANCE_VISION_BASE}/depth", {"symbol": raw_sym, "limit": 500}, timeout=4.0)
+                    bids = ob.get("bids", []) if isinstance(ob, dict) else []
+                    asks = ob.get("asks", []) if isinstance(ob, dict) else []
+                    t24 = _http_get_json(f"{_BINANCE_VISION_BASE}/ticker/24hr", {"symbol": raw_sym}, timeout=4.0)
+                    if isinstance(t24, dict):
+                        intel.price_change_24h_pct = float(t24.get("priceChangePercent") or 0.0)
+                        intel.high_24h = float(t24.get("highPrice") or 0.0)
+                        intel.low_24h = float(t24.get("lowPrice") or 0.0)
+                        intel.quote_volume_24h_usd = float(t24.get("quoteVolume") or 0.0)
 
-            if bids and asks:
-                mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
-                # Filter orders within ±2.5% of mid_price to focus on actionable liquidity
-                valid_bids = [(float(p), float(q)) for p, q in bids if float(p) >= mid_price * 0.975]
-                valid_asks = [(float(p), float(q)) for p, q in asks if float(p) <= mid_price * 1.025]
-                if not valid_bids:
-                    valid_bids = [(float(p), float(q)) for p, q in bids[:50]]
-                if not valid_asks:
-                    valid_asks = [(float(p), float(q)) for p, q in asks[:50]]
+                elif s_ex == "okx":
+                    ob_res = _http_get_json("https://www.okx.com/api/v5/market/books", {"instId": f"{base_ccy}-{quote_ccy}", "sz": 100}, timeout=4.0)
+                    ob_data = ob_res.get("data", []) if isinstance(ob_res, dict) else []
+                    if ob_data:
+                        bids = [[r[0], r[1]] for r in ob_data[0].get("bids", [])]
+                        asks = [[r[0], r[1]] for r in ob_data[0].get("asks", [])]
+                    tk_res = _http_get_json("https://www.okx.com/api/v5/market/ticker", {"instId": f"{base_ccy}-{quote_ccy}"}, timeout=4.0)
+                    tk_data = tk_res.get("data", []) if isinstance(tk_res, dict) else []
+                    if tk_data:
+                        tk = tk_data[0]
+                        last_p = float(tk.get("last") or 0.0)
+                        open_24 = float(tk.get("open24h") or 0.0)
+                        if open_24 > 0:
+                            intel.price_change_24h_pct = ((last_p - open_24) / open_24) * 100.0
+                        intel.high_24h = float(tk.get("high24h") or 0.0)
+                        intel.low_24h = float(tk.get("low24h") or 0.0)
+                        intel.quote_volume_24h_usd = float(tk.get("volCcy24h") or 0.0)
 
-                bid_usd = float(sum(p * q for p, q in valid_bids))
-                ask_usd = float(sum(p * q for p, q in valid_asks))
+                elif s_ex == "bybit":
+                    for dom in ("https://api.bytick.com", "https://api.bybit.com"):
+                        try:
+                            ob_res = _http_get_json(f"{dom}/v5/market/orderbook", {"category": "spot", "symbol": raw_sym, "limit": 100}, timeout=3.5)
+                            ob_r = ob_res.get("result", {}) if isinstance(ob_res, dict) else {}
+                            bids = ob_r.get("b", [])
+                            asks = ob_r.get("a", [])
+                            tk_res = _http_get_json(f"{dom}/v5/market/tickers", {"category": "spot", "symbol": raw_sym}, timeout=3.5)
+                            tk_list = tk_res.get("result", {}).get("list", []) if isinstance(tk_res, dict) else []
+                            if tk_list:
+                                tk = tk_list[0]
+                                intel.price_change_24h_pct = float(tk.get("price24hPcnt") or 0.0) * 100.0
+                                intel.high_24h = float(tk.get("highPrice24h") or 0.0)
+                                intel.low_24h = float(tk.get("lowPrice24h") or 0.0)
+                                intel.quote_volume_24h_usd = float(tk.get("turnover24h") or 0.0)
+                            if bids and asks:
+                                break
+                        except Exception:
+                            continue
 
-                # Inverse-distance exponential weighting: exp(-dist_pct / 0.85) to filter distant spoofing orders
-                w_bid_usd = float(
-                    sum(
-                        (p * q) * np.exp(-abs((mid_price - p) / max(mid_price, 1e-9)) * 100.0 / 0.85)
-                        for p, q in valid_bids
-                    )
-                )
-                w_ask_usd = float(
-                    sum(
-                        (p * q) * np.exp(-abs((p - mid_price) / max(mid_price, 1e-9)) * 100.0 / 0.85)
-                        for p, q in valid_asks
-                    )
-                )
-                w_total_usd = w_bid_usd + w_ask_usd
+                elif s_ex == "kucoin":
+                    ob_res = _http_get_json("https://api.kucoin.com/api/v1/market/orderbook/level2_100", {"symbol": f"{base_ccy}-{quote_ccy}"}, timeout=4.0)
+                    ob_d = ob_res.get("data", {}) if isinstance(ob_res, dict) else {}
+                    bids = ob_d.get("bids", [])
+                    asks = ob_d.get("asks", [])
+                    tk_res = _http_get_json("https://api.kucoin.com/api/v1/market/stats", {"symbol": f"{base_ccy}-{quote_ccy}"}, timeout=4.0)
+                    tk_d = tk_res.get("data", {}) if isinstance(tk_res, dict) else {}
+                    if tk_d:
+                        intel.price_change_24h_pct = float(tk_d.get("changeRate") or 0.0) * 100.0
+                        intel.high_24h = float(tk_d.get("high") or 0.0)
+                        intel.low_24h = float(tk_d.get("low") or 0.0)
+                        intel.quote_volume_24h_usd = float(tk_d.get("volValue") or 0.0)
 
-                intel.bid_volume_usd = bid_usd
-                intel.ask_volume_usd = ask_usd
-                if w_total_usd > 0:
-                    intel.imbalance_pct = (w_bid_usd / w_total_usd) * 100.0
-                    intel.imbalance_net_ratio = (w_bid_usd - w_ask_usd) / w_total_usd
+                elif s_ex == "gate":
+                    ob = _http_get_json("https://api.gateio.ws/api/v4/spot/order_book", {"currency_pair": f"{base_ccy}_{quote_ccy}", "limit": 100}, timeout=4.0)
+                    if isinstance(ob, dict):
+                        bids = ob.get("bids", [])
+                        asks = ob.get("asks", [])
+                    tk_list = _http_get_json("https://api.gateio.ws/api/v4/spot/tickers", {"currency_pair": f"{base_ccy}_{quote_ccy}"}, timeout=4.0)
+                    if isinstance(tk_list, list) and len(tk_list) > 0:
+                        tk = tk_list[0]
+                        intel.price_change_24h_pct = float(tk.get("change_percentage") or 0.0)
+                        intel.high_24h = float(tk.get("high_24h") or 0.0)
+                        intel.low_24h = float(tk.get("low_24h") or 0.0)
+                        intel.quote_volume_24h_usd = float(tk.get("quote_volume") or 0.0)
 
-                # Identify largest Bid Wall & Ask Wall within actionable depth
-                best_bid_wall = max(valid_bids, key=lambda x: x[0] * x[1])
-                best_ask_wall = max(valid_asks, key=lambda x: x[0] * x[1])
-                intel.strongest_bid_wall = float(best_bid_wall[0])
-                intel.strongest_ask_wall = float(best_ask_wall[0])
-                intel.strongest_bid_wall_usd = float(best_bid_wall[0] * best_bid_wall[1])
-                intel.strongest_ask_wall_usd = float(best_ask_wall[0] * best_ask_wall[1])
-
-                if intel.imbalance_pct >= 58.0:
-                    intel.orderbook_status_tr = f"Güçlü Alıcı Likiditesi (%{intel.imbalance_pct:.1f} Alış Duvarı)"
-                elif intel.imbalance_pct >= 52.5:
-                    intel.orderbook_status_tr = f"Alıcı Ağırlıklı Derinlik (%{intel.imbalance_pct:.1f} Alış)"
-                elif intel.imbalance_pct <= 42.0:
-                    intel.orderbook_status_tr = f"Güçlü Satıcı Likiditesi (%{100 - intel.imbalance_pct:.1f} Satış Duvarı)"
-                elif intel.imbalance_pct <= 47.5:
-                    intel.orderbook_status_tr = f"Satıcı Ağırlıklı Derinlik (%{100 - intel.imbalance_pct:.1f} Satış)"
                 else:
-                    intel.orderbook_status_tr = f"Dengeli Emir Defteri (%{intel.imbalance_pct:.1f} Alış / %{100 - intel.imbalance_pct:.1f} Satış)"
+                    spot = self._get_spot_exchange(s_ex)
+                    cand_syms = [target_symbol]
+                    if target_symbol.endswith("/USDT"):
+                        cand_syms.append(target_symbol.replace("/USDT", "/USD"))
+                    for c_sym in cand_syms:
+                        try:
+                            ob = spot.fetch_order_book(c_sym, limit=100)
+                            if ob and ob.get("bids") and ob.get("asks"):
+                                bids = ob["bids"]
+                                asks = ob["asks"]
+                                ticker = spot.fetch_ticker(c_sym)
+                                if ticker:
+                                    intel.price_change_24h_pct = float(ticker.get("percentage") or 0.0)
+                                    intel.high_24h = float(ticker.get("high") or 0.0)
+                                    intel.low_24h = float(ticker.get("low") or 0.0)
+                                    intel.quote_volume_24h_usd = float(ticker.get("quoteVolume") or 0.0)
+                                break
+                        except Exception:
+                            continue
 
-            if ex_id == "binance":
-                t24 = spot.publicGetTicker24hr({"symbol": raw_sym})
-                intel.price_change_24h_pct = float(t24.get("priceChangePercent") or 0.0)
-                intel.high_24h = float(t24.get("highPrice") or 0.0)
-                intel.low_24h = float(t24.get("lowPrice") or 0.0)
-                intel.quote_volume_24h_usd = float(t24.get("quoteVolume") or 0.0)
-            else:
-                ticker = spot.fetch_ticker(target_symbol)
-                intel.price_change_24h_pct = float(ticker.get("percentage") or 0.0)
-                intel.high_24h = float(ticker.get("high") or 0.0)
-                intel.low_24h = float(ticker.get("low") or 0.0)
-                intel.quote_volume_24h_usd = float(ticker.get("quoteVolume") or 0.0)
+                if bids and asks:
+                    mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
+                    valid_bids = [(float(p), float(q)) for p, q in bids if float(p) >= mid_price * 0.975]
+                    valid_asks = [(float(p), float(q)) for p, q in asks if float(p) <= mid_price * 1.025]
+                    if not valid_bids:
+                        valid_bids = [(float(p), float(q)) for p, q in bids[:50]]
+                    if not valid_asks:
+                        valid_asks = [(float(p), float(q)) for p, q in asks[:50]]
 
-        except Exception as exc:
-            logger.debug(f"[{ex_id.upper()}] Spot OrderBook/Ticker uyarısı ({target_symbol}): {exc}")
+                    bid_usd = float(sum(p * q for p, q in valid_bids))
+                    ask_usd = float(sum(p * q for p, q in valid_asks))
 
-        # 2. Perpetual Futures Intelligence (Funding Rate, OI, OI Change %, Long/Short Ratio)
+                    w_bid_usd = float(
+                        sum(
+                            (p * q) * np.exp(-abs((mid_price - p) / max(mid_price, 1e-9)) * 100.0 / 0.85)
+                            for p, q in valid_bids
+                        )
+                    )
+                    w_ask_usd = float(
+                        sum(
+                            (p * q) * np.exp(-abs((p - mid_price) / max(mid_price, 1e-9)) * 100.0 / 0.85)
+                            for p, q in valid_asks
+                        )
+                    )
+                    w_total_usd = w_bid_usd + w_ask_usd
+
+                    intel.bid_volume_usd = bid_usd
+                    intel.ask_volume_usd = ask_usd
+                    if w_total_usd > 0:
+                        intel.imbalance_pct = (w_bid_usd / w_total_usd) * 100.0
+                        intel.imbalance_net_ratio = (w_bid_usd - w_ask_usd) / w_total_usd
+
+                    best_bid_wall = max(valid_bids, key=lambda x: x[0] * x[1])
+                    best_ask_wall = max(valid_asks, key=lambda x: x[0] * x[1])
+                    intel.strongest_bid_wall = float(best_bid_wall[0])
+                    intel.strongest_ask_wall = float(best_ask_wall[0])
+                    intel.strongest_bid_wall_usd = float(best_bid_wall[0] * best_bid_wall[1])
+                    intel.strongest_ask_wall_usd = float(best_ask_wall[0] * best_ask_wall[1])
+
+                    if intel.imbalance_pct >= 58.0:
+                        intel.orderbook_status_tr = f"Güçlü Alıcı Likiditesi (%{intel.imbalance_pct:.1f} Alış Duvarı)"
+                    elif intel.imbalance_pct >= 52.5:
+                        intel.orderbook_status_tr = f"Alıcı Ağırlıklı Derinlik (%{intel.imbalance_pct:.1f} Alış)"
+                    elif intel.imbalance_pct <= 42.0:
+                        intel.orderbook_status_tr = f"Güçlü Satıcı Likiditesi (%{100 - intel.imbalance_pct:.1f} Satış Duvarı)"
+                    elif intel.imbalance_pct <= 47.5:
+                        intel.orderbook_status_tr = f"Satıcı Ağırlıklı Derinlik (%{100 - intel.imbalance_pct:.1f} Satış)"
+                    else:
+                        intel.orderbook_status_tr = f"Dengeli Emir Defteri (%{intel.imbalance_pct:.1f} Alış / %{100 - intel.imbalance_pct:.1f} Satış)"
+
+                if intel.strongest_bid_wall > 0:
+                    break
+            except Exception as exc:
+                logger.debug(f"[{s_ex.upper()}] Spot OrderBook/Ticker uyarısı ({target_symbol}): {exc}")
+
+        # 2. Perpetual Futures Intelligence (Direct HTTP REST without CCXT load_markets overhead)
         try:
-            swap = self._get_swap_exchange(ex_id)
-            raw_sym = target_symbol.replace("/", "").replace(":USDT", "")
             mark_p_ref = 0.0
-            if ex_id == "binance":
+            # 2a. Try Bybit Linear Ticker if selected
+            if ex_id == "bybit":
+                for dom in ("https://api.bytick.com", "https://api.bybit.com"):
+                    try:
+                        lin_res = _http_get_json(f"{dom}/v5/market/tickers", {"category": "linear", "symbol": raw_sym}, timeout=3.0)
+                        lin_list = lin_res.get("result", {}).get("list", []) if isinstance(lin_res, dict) else []
+                        if lin_list:
+                            lt = lin_list[0]
+                            if lt.get("fundingRate"):
+                                intel.funding_rate_pct = float(lt["fundingRate"]) * 100.0
+                            if lt.get("openInterestValue"):
+                                intel.open_interest_usd = float(lt["openInterestValue"])
+                            mp = float(lt.get("markPrice") or 0.0)
+                            ip = float(lt.get("indexPrice") or 0.0)
+                            if mp > 0 and ip > 0:
+                                mark_p_ref = mp
+                                intel.perp_spot_basis_pct = ((mp - ip) / ip) * 100.0
+                            break
+                    except Exception:
+                        continue
+
+            # 2b. Try Gate.io Futures Contract if selected or needed
+            if ex_id == "gate" or intel.funding_rate_pct is None:
                 try:
-                    prem = swap.fapiPublicGetPremiumIndex({"symbol": raw_sym})
-                    if prem and prem.get("lastFundingRate") is not None:
-                        intel.funding_rate_pct = float(prem["lastFundingRate"]) * 100.0
-                    mark_p_ref = float(prem.get("markPrice") or 0.0)
-                    idx_p = float(prem.get("indexPrice") or 0.0)
-                    if mark_p_ref > 0 and idx_p > 0:
-                        intel.perp_spot_basis_pct = ((mark_p_ref - idx_p) / idx_p) * 100.0
-                except Exception:
-                    pass
-            else:
-                swap_symbol = f"{target_symbol}:USDT" if ":" not in target_symbol else target_symbol
-                fr_data = None
-                try:
-                    fr_data = swap.fetch_funding_rate(swap_symbol)
-                except Exception:
-                    fr_data = swap.fetch_funding_rate(target_symbol)
-                if fr_data and fr_data.get("fundingRate") is not None:
-                    intel.funding_rate_pct = float(fr_data["fundingRate"]) * 100.0
-                if fr_data and fr_data.get("markPrice") and fr_data.get("indexPrice"):
-                    mark_p_ref = float(fr_data["markPrice"])
-                    idx_p = float(fr_data["indexPrice"])
-                    if idx_p > 0:
-                        intel.perp_spot_basis_pct = ((mark_p_ref - idx_p) / idx_p) * 100.0
-                try:
-                    oi_data = swap.fetch_open_interest(swap_symbol)
-                    if oi_data and oi_data.get("openInterestValue") is not None:
-                        intel.open_interest_usd = float(oi_data["openInterestValue"])
+                    g_res = _http_get_json(f"https://api.gateio.ws/api/v4/futures/usdt/contracts/{base_ccy}_USDT", timeout=3.0)
+                    if isinstance(g_res, dict):
+                        if intel.funding_rate_pct is None and g_res.get("funding_rate") is not None:
+                            intel.funding_rate_pct = float(g_res["funding_rate"]) * 100.0
+                        mp = float(g_res.get("mark_price") or 0.0)
+                        ip = float(g_res.get("index_price") or 0.0)
+                        if mp > 0 and ip > 0 and intel.perp_spot_basis_pct is None:
+                            mark_p_ref = mp
+                            intel.perp_spot_basis_pct = ((mp - ip) / ip) * 100.0
                 except Exception:
                     pass
 
-            # Try fetching Historical OI Change (last 24h), Long/Short Ratio & Futures Taker Buy/Sell Ratio on Binance Futures
-            if ex_id == "binance":
-                try:
-                    oi_hist = swap.fapiDataGetOpenInterestHist({
-                        "symbol": raw_sym,
-                        "period": "1h",
-                        "limit": 24,
-                    })
-                    if oi_hist and len(oi_hist) >= 2:
-                        oi_start = float(oi_hist[0].get("sumOpenInterestValue", 0.0))
-                        oi_end = float(oi_hist[-1].get("sumOpenInterestValue", 0.0))
-                        if oi_start > 0:
-                            intel.oi_change_24h_pct = ((oi_end - oi_start) / oi_start) * 100.0
-                        oi_prev_1h = float(oi_hist[-2].get("sumOpenInterestValue", 0.0))
-                        if oi_prev_1h > 0:
-                            intel.oi_change_1h_pct = ((oi_end - oi_prev_1h) / oi_prev_1h) * 100.0
-                        idx_4h = max(0, len(oi_hist) - 5)
-                        oi_prev_4h = float(oi_hist[idx_4h].get("sumOpenInterestValue", 0.0))
-                        if oi_prev_4h > 0:
-                            intel.oi_change_4h_pct = ((oi_end - oi_prev_4h) / oi_prev_4h) * 100.0
-                        if intel.open_interest_usd is None and oi_end > 0:
-                            intel.open_interest_usd = oi_end
-                except Exception:
-                    pass
+            # 2c. Direct OKX Swap Rubik Stats (works globally & in US on streamlit.app, gives Funding, OI 1h/4h/24h delta, L/S ratio, Taker Vol)
+            try:
+                inst_id = f"{base_ccy}-USDT-SWAP"
+                if intel.funding_rate_pct is None or ex_id == "okx":
+                    fr_res = _http_get_json("https://www.okx.com/api/v5/public/funding-rate", {"instId": inst_id}, timeout=3.5)
+                    fr_list = fr_res.get("data", []) if isinstance(fr_res, dict) else []
+                    if fr_list and fr_list[0].get("fundingRate") is not None:
+                        intel.funding_rate_pct = float(fr_list[0]["fundingRate"]) * 100.0
 
-                try:
-                    ls_hist = swap.fapiDataGetTopLongShortPositionRatio({
-                        "symbol": raw_sym,
-                        "period": "1h",
-                        "limit": 1,
-                    })
-                    if ls_hist and len(ls_hist) >= 1:
-                        intel.long_short_ratio = float(ls_hist[-1].get("longShortRatio", 1.0))
-                except Exception:
-                    pass
+                if intel.oi_change_24h_pct is None:
+                    oih_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume", {"ccy": base_ccy, "period": "1H"}, timeout=3.5)
+                    oih_list = oih_res.get("data", []) if isinstance(oih_res, dict) else []
+                    if oih_list and len(oih_list) >= 2:
+                        oi_now = float(oih_list[0][1])
+                        oi_1h = float(oih_list[1][1])
+                        oi_4h = float(oih_list[min(4, len(oih_list) - 1)][1])
+                        oi_24h = float(oih_list[min(24, len(oih_list) - 1)][1])
+                        if oi_now > 0:
+                            intel.open_interest_usd = oi_now
+                        if oi_1h > 0:
+                            intel.oi_change_1h_pct = ((oi_now - oi_1h) / oi_1h) * 100.0
+                        if oi_4h > 0:
+                            intel.oi_change_4h_pct = ((oi_now - oi_4h) / oi_4h) * 100.0
+                        if oi_24h > 0:
+                            intel.oi_change_24h_pct = ((oi_now - oi_24h) / oi_24h) * 100.0
 
-                try:
-                    taker_hist = swap.fapiDataGetTakerlongshortRatio({
-                        "symbol": raw_sym,
-                        "period": "1h",
-                        "limit": 6,
-                    })
-                    if taker_hist and len(taker_hist) >= 1:
-                        intel.futures_taker_buy_sell_ratio = float(taker_hist[-1].get("buySellRatio", 1.0))
-                        buy_vol_sum = sum(float(x.get("buyVol", 0.0)) for x in taker_hist)
-                        sell_vol_sum = sum(float(x.get("sellVol", 0.0)) for x in taker_hist)
+                if intel.long_short_ratio is None:
+                    ls_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio", {"ccy": base_ccy, "period": "1H"}, timeout=3.5)
+                    ls_list = ls_res.get("data", []) if isinstance(ls_res, dict) else []
+                    if ls_list and len(ls_list) >= 1:
+                        intel.long_short_ratio = float(ls_list[0][1])
+
+                if intel.futures_taker_buy_sell_ratio is None:
+                    tv_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/taker-volume", {"ccy": base_ccy, "instType": "CONTRACTS", "period": "1H"}, timeout=3.5)
+                    tv_list = tv_res.get("data", []) if isinstance(tv_res, dict) else []
+                    if tv_list and len(tv_list) >= 1:
+                        sell_v = float(tv_list[0][1] or 0.0)
+                        buy_v = float(tv_list[0][2] or 0.0)
+                        if sell_v > 0:
+                            intel.futures_taker_buy_sell_ratio = buy_v / sell_v
                         ref_p = float(mark_p_ref or intel.high_24h or 1.0)
-                        intel.perp_cvd_delta_24h_usd = (buy_vol_sum - sell_vol_sum) * ref_p
-                except Exception:
-                    pass
+                        intel.perp_cvd_delta_24h_usd = (buy_v - sell_v) * ref_p
+            except Exception:
+                pass
 
             # Classify 4-Quadrant Open Interest (OI) x Price Regime
             if intel.oi_change_24h_pct is not None:

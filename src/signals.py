@@ -28,6 +28,36 @@ class SupportResistanceLevel:
     level_type: str  # "DESTEK" or "DİRENÇ"
     touches: int
     strength_label: str
+    is_strong: bool = False
+    strength_score: float = 40.0
+    tier_tr: str = "Destek"  # "🛡️ Güçlü Destek", "🟢 Destek", "🧱 Güçlü Direnç", "🔴 Direnç"
+    confluence_tags: List[str] = field(default_factory=list)
+    htf_confirmed: bool = False
+    htf_tag_tr: str = ""
+    reaction_count: int = 0
+    test_count: int = 0
+    reaction_rate_pct: float = 0.0
+    avg_bounce_pct: float = 0.0
+    stats_summary_tr: str = ""
+
+
+@dataclass
+class DynamicTrendlineReport:
+    """Represents automatically fitted Ascending Support & Descending Resistance Trendlines on closed candles."""
+    has_support_line: bool = False
+    sup_x0: Optional[pd.Timestamp] = None
+    sup_y0: float = 0.0
+    sup_x1: Optional[pd.Timestamp] = None
+    sup_y1: float = 0.0
+    sup_current_price: float = 0.0
+    has_resistance_line: bool = False
+    res_x0: Optional[pd.Timestamp] = None
+    res_y0: float = 0.0
+    res_x1: Optional[pd.Timestamp] = None
+    res_y1: float = 0.0
+    res_current_price: float = 0.0
+    breakout_status: str = "NONE"  # "BULL_BREAKOUT", "BEAR_BREAKDOWN", "CONVERGING_SQUEEZE", "NONE"
+    summary_tr: str = "Aktif Dinamik Trend Kırılımı Yok"
 
 
 @dataclass
@@ -101,6 +131,7 @@ class FuturesSetupReport:
     max_safe_leverage: int = 1
     sr_context_tr: str = ""
     futures_tech_summary_tr: str = ""
+    leverage_squeeze_status_tr: str = "Normal Kaldıraç Dengesi"
     positive_factors_tr: List[str] = field(default_factory=list)
     risk_warnings_tr: List[str] = field(default_factory=list)
     wait_condition_tr: str = ""
@@ -152,6 +183,14 @@ class MarketForecast:
     fib_618_price: float = 0.0
     nearest_support: Optional[float] = None
     nearest_resistance: Optional[float] = None
+    nearest_support_tier_tr: str = "🟢 Destek"
+    nearest_support_score: float = 45.0
+    nearest_support_reason_tr: str = ""
+    nearest_resistance_tier_tr: str = "🔴 Direnç"
+    nearest_resistance_score: float = 45.0
+    nearest_resistance_reason_tr: str = ""
+    strongest_support: Optional[float] = None
+    strongest_resistance: Optional[float] = None
     atr_value: float = 0.0
     bullish_trigger_price: float = 0.0
     bullish_target_price: float = 0.0
@@ -201,6 +240,14 @@ class MarketForecast:
     resistance_levels: List[SupportResistanceLevel] = field(default_factory=list)
     divergences: List[DivergenceSignal] = field(default_factory=list)
     factor_notes_tr: List[str] = field(default_factory=list)
+
+    # v9.2 5-Module Institutional Price-Action & MTF Extensions
+    sr_action_type: str = "NONE"  # "BULL_SFP", "BULL_RETEST", "BEAR_SFP", "BEAR_RETEST", "NONE"
+    sr_action_status_tr: str = "Aktif Kırılım Testi (Retest) veya Tuzak (SFP) Yok"
+    sr_action_price: float = 0.0
+    sr_action_time: Optional[pd.Timestamp] = None
+    leverage_squeeze_status_tr: str = "Normal Kaldıraç Dengesi"
+    trendlines: DynamicTrendlineReport = field(default_factory=DynamicTrendlineReport)
 
 
 class SignalEngine:
@@ -687,109 +734,643 @@ class SignalEngine:
     @staticmethod
     def detect_support_resistance(
         df: pd.DataFrame,
-        window: int = 7,
-        max_levels: int = 2,
+        window: int = 6,
+        max_levels: int = 3,
+        order_flow: Optional[OrderFlowIntel] = None,
+        order_blocks: Optional[List] = None,
+        htf_sr_levels: Optional[List[SupportResistanceLevel]] = None,
     ) -> Tuple[List[SupportResistanceLevel], List[SupportResistanceLevel]]:
         """
-        Institutional Support & Resistance Detector combining:
-            1. Swing High / Swing Low Pivot Clusters
-            2. Volume Profile (POC, VAH, VAL) High-Volume Nodes
-            3. Golden Ratio Fibonacci (0.618 & 0.382) Retracement Zones
+        Institutional 8-Layer Candle-Anchored & MTF-Validated Support/Resistance Detector (v9.2):
+            - Extracts structural pivots, 65-bar extremes, and candle rejections from CLOSED candles (`closed_df`)
+            - Combines Major Swing Pivots (`window=6`), Recent Confirmed Local Swings (`local_win=3`), and Wick Rejections
+            - Cross-checks against Higher-Timeframe (`4H`/`1D`) S/R zones (`htf_sr_levels`) for MTF Wall Confluence
+            - Computes level-specific historical bounce win-rate (%) and average reaction magnitude (%) over 5-bar horizons
+            - Enforces ATR-aware minimum separation between 1st and 2nd Support/Resistance zones
         """
-        if len(df) < window * 2 + 1:
+        if len(df) < window * 2 + 2:
             return [], []
 
-        highs = df["high"].values
-        lows = df["low"].values
+        closed_df = df.iloc[:-1] if len(df) > window * 2 + 2 else df
+        n_closed = len(closed_df)
+        highs = closed_df["high"].to_numpy(dtype=float)
+        lows = closed_df["low"].to_numpy(dtype=float)
+        opens = closed_df["open"].to_numpy(dtype=float)
+        closes = closed_df["close"].to_numpy(dtype=float)
+        vols = closed_df["volume"].to_numpy(dtype=float) if "volume" in closed_df.columns else np.ones(n_closed)
+        avg_vol = float(np.nanmean(vols)) if n_closed > 0 else 1.0
+
         current_price = float(df["close"].iloc[-1])
-        atr_val = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else current_price * 0.008
-        price_range = float(df["high"].max() - df["low"].min())
-        cluster_tol = max(price_range * 0.015, current_price * 0.0045)
-        zone_half_width = max(atr_val * 0.25, current_price * 0.0018)
+        atr_val = (
+            float(closed_df["atr"].iloc[-1])
+            if "atr" in closed_df.columns and pd.notna(closed_df["atr"].iloc[-1])
+            else current_price * 0.008
+        )
+        lookback_df = closed_df.tail(min(n_closed, 120))
+        price_range = float(lookback_df["high"].max() - lookback_df["low"].min())
+        cluster_tol = max(atr_val * 0.55, price_range * 0.012, current_price * 0.0038)
+        zone_half_width = max(atr_val * 0.22, current_price * 0.0016)
 
-        candidates: List[Tuple[float, str]] = []
+        candidates: List[Tuple[float, str, bool, float, int]] = []
+        used_high_bars: set = set()
+        used_low_bars: set = set()
 
-        # 1. Pivot Highs & Lows
-        for i in range(window, len(df) - window):
-            if highs[i] == np.max(highs[i - window : i + window + 1]):
-                candidates.append((float(highs[i]), "Pivot"))
-            if lows[i] == np.min(lows[i - window : i + window + 1]):
-                candidates.append((float(lows[i]), "Pivot"))
+        # 1A. 65-Bar Major Structural Extremes (Closed Candles - Highest priority candle anchor)
+        start_65 = max(0, n_closed - 65)
+        idx_hi65 = int(start_65 + int(np.argmax(highs[start_65:])))
+        idx_lo65 = int(start_65 + int(np.argmin(lows[start_65:])))
+        candidates.append((float(highs[idx_hi65]), "Ana Tepe/Dip", True, 1.75, idx_hi65))
+        candidates.append((float(lows[idx_lo65]), "Ana Tepe/Dip", True, 1.75, idx_lo65))
+        used_high_bars.add(idx_hi65)
+        used_low_bars.add(idx_lo65)
 
-        candidates.append((float(df["high"].tail(65).max()), "Major Ekstrem"))
-        candidates.append((float(df["low"].tail(65).min()), "Major Ekstrem"))
+        # 1B. Major Structural Swing Highs & Lows on Closed Candles (window = 6)
+        for i in range(window, n_closed - window):
+            rec_w = 1.45 if i >= n_closed - 65 else 1.10
+            win_h = highs[i - window : i + window + 1]
+            win_l = lows[i - window : i + window + 1]
+            if highs[i] >= np.max(win_h) - 1e-12 and all(abs(i - ub) >= 3 for ub in used_high_bars):
+                candidates.append((float(highs[i]), "Pivot", True, rec_w, i))
+                used_high_bars.add(i)
+            if lows[i] <= np.min(win_l) + 1e-12 and all(abs(i - ub) >= 3 for ub in used_low_bars):
+                candidates.append((float(lows[i]), "Pivot", True, rec_w, i))
+                used_low_bars.add(i)
 
-        # 2. Volume Profile Key Nodes (POC, VAH, VAL)
-        if "vp_poc" in df.columns:
-            poc = float(df["vp_poc"].iloc[-1])
-            vah = float(df["vp_vah"].iloc[-1])
-            val = float(df["vp_val"].iloc[-1])
-            candidates.append((poc, "Hacim POC"))
-            candidates.append((vah, "Hacim VAH"))
-            candidates.append((val, "Hacim VAL"))
+        # 1C. Recent Confirmed Local Swing Pivots (captures bounces/rejections in the last 36 closed bars!)
+        local_win = 3
+        start_local = max(local_win, n_closed - 36)
+        for i in range(start_local, n_closed - 2):
+            r_right = min(local_win, n_closed - 1 - i)
+            if r_right < 2:
+                continue
+            win_h = highs[i - local_win : i + r_right + 1]
+            win_l = lows[i - local_win : i + r_right + 1]
+            if highs[i] >= np.max(win_h) - 1e-12 and all(abs(i - ub) >= 3 for ub in used_high_bars):
+                candidates.append((float(highs[i]), "Yakın Pivot", True, 1.60, i))
+                used_high_bars.add(i)
+            if lows[i] <= np.min(win_l) + 1e-12 and all(abs(i - ub) >= 3 for ub in used_low_bars):
+                candidates.append((float(lows[i]), "Yakın Pivot", True, 1.60, i))
+                used_low_bars.add(i)
 
-        # 3. Fibonacci 0.618 & 0.382 Retracements of recent 90 bars
-        recent_high = float(df["high"].tail(90).max())
-        recent_low = float(df["low"].tail(90).min())
+        # 3. Volume Profile Key Nodes (POC is a high-volume traded price anchor; VAH/VAL are channel boundaries)
+        if "vp_poc" in closed_df.columns:
+            poc = float(closed_df["vp_poc"].iloc[-1])
+            vah = float(closed_df["vp_vah"].iloc[-1])
+            val = float(closed_df["vp_val"].iloc[-1])
+            if poc > 0:
+                candidates.append((poc, "Hacim POC", True, 1.15, -1))
+            if vah > 0:
+                candidates.append((vah, "Hacim VAH", False, 0.85, -1))
+            if val > 0:
+                candidates.append((val, "Hacim VAL", False, 0.85, -1))
+
+        # 4. Institutional Cost Basis (AVWAP Low/High) & Macro EMA 200 (Confluence boosters)
+        if "avwap_low" in closed_df.columns and pd.notna(closed_df["avwap_low"].iloc[-1]):
+            av_l = float(closed_df["avwap_low"].iloc[-1])
+            if av_l > 0:
+                candidates.append((av_l, "Dip Maliyet (AVWAP)", False, 0.90, -1))
+        if "avwap_high" in closed_df.columns and pd.notna(closed_df["avwap_high"].iloc[-1]):
+            av_h = float(closed_df["avwap_high"].iloc[-1])
+            if av_h > 0:
+                candidates.append((av_h, "Tepe Maliyet (AVWAP)", False, 0.90, -1))
+        if "ema_200" in closed_df.columns and pd.notna(closed_df["ema_200"].iloc[-1]):
+            e200 = float(closed_df["ema_200"].iloc[-1])
+            if e200 > 0:
+                candidates.append((e200, "EMA 200", False, 0.90, -1))
+
+        # 5. Fibonacci 0.618 & 0.382 Retracements of recent 90 closed bars
+        recent_90 = closed_df.tail(min(n_closed, 90))
+        recent_high = float(recent_90["high"].max())
+        recent_low = float(recent_90["low"].min())
         span_90 = recent_high - recent_low
         if span_90 > 0:
             fib_618 = recent_high - 0.618 * span_90
             fib_382 = recent_high - 0.382 * span_90
-            candidates.append((fib_618, "Fib 0.618"))
-            candidates.append((fib_382, "Fib 0.382"))
+            candidates.append((fib_618, "Fib 0.618", False, 0.80, -1))
+            candidates.append((fib_382, "Fib 0.382", False, 0.75, -1))
 
-        # Cluster nearby levels and classify strictly relative to current_price (handles S/R Flip!)
+        # 6. Smart Money Order Blocks (Real institutional candle base)
+        if order_blocks:
+            for ob in order_blocks:
+                ob_mid = 0.5 * (float(ob.bottom) + float(ob.top))
+                if ob_mid > 0:
+                    candidates.append((ob_mid, "Balina OB", True, 1.25, -1))
+
+        # 7. Live Exchange OrderBook Bid/Ask Walls (within ±12% of current price)
+        if order_flow is not None:
+            if order_flow.strongest_bid_wall and 0 < order_flow.strongest_bid_wall < current_price:
+                if abs(current_price - order_flow.strongest_bid_wall) / current_price <= 0.12:
+                    candidates.append((float(order_flow.strongest_bid_wall), "Alış Duvarı", False, 1.0, -1))
+            if order_flow.strongest_ask_wall and order_flow.strongest_ask_wall > current_price:
+                if abs(order_flow.strongest_ask_wall - current_price) / current_price <= 0.12:
+                    candidates.append((float(order_flow.strongest_ask_wall), "Satış Duvarı", False, 1.0, -1))
+
+        # Cluster nearby candidates while anchoring cluster center to real candle pivots
         candidates.sort(key=lambda x: x[0])
-        clusters: List[Tuple[List[float], List[str]]] = []
-        for price_val, tag in candidates:
+        clusters: List[List[Tuple[float, str, bool, float, int]]] = []
+        for item in candidates:
+            price_val = item[0]
             placed = False
-            for c_prices, c_tags in clusters:
-                if abs(np.mean(c_prices) - price_val) <= cluster_tol:
-                    c_prices.append(price_val)
-                    if tag not in c_tags:
-                        c_tags.append(tag)
+            for cl in clusters:
+                anchor_prices = [x[0] for x in cl if x[2]]
+                ref_price = float(np.mean(anchor_prices)) if anchor_prices else float(np.mean([x[0] for x in cl]))
+                if abs(ref_price - price_val) <= cluster_tol:
+                    cl.append(item)
                     placed = True
                     break
             if not placed:
-                clusters.append(([price_val], [tag]))
+                clusters.append([item])
 
-        supports: List[SupportResistanceLevel] = []
-        resistances: List[SupportResistanceLevel] = []
+        raw_supports: List[SupportResistanceLevel] = []
+        raw_resistances: List[SupportResistanceLevel] = []
+        min_dist_from_price = max(atr_val * 0.18, current_price * 0.0018)
+        body_lows = np.minimum(opens, closes)
+        body_highs = np.maximum(opens, closes)
 
-        for c_prices, c_tags in clusters:
-            lvl_price = float(np.mean(c_prices))
-            touches = len(c_prices)
-            special_tags = [t for t in c_tags if t not in ("Pivot", "Major Ekstrem")]
-            tag_suffix = f" + {'/'.join(special_tags)}" if special_tags else ""
+        for cl in clusters:
+            c_tags: List[str] = []
+            for _, t_name, _, _, _ in cl:
+                if t_name not in c_tags:
+                    c_tags.append(t_name)
 
-            if lvl_price < current_price * 0.9985:
-                strength = f"Güçlü Destek ({touches} Onay{tag_suffix})" if touches >= 2 or special_tags else "Yakın Destek"
-                supports.append(
+            pure_pivots = [(p, w, b_idx) for p, t, is_anc, w, b_idx in cl if b_idx >= 0]
+            struct_anchors = [(p, w) for p, t, is_anc, w, _ in cl if is_anc]
+            if pure_pivots:
+                best_piv = max(pure_pivots, key=lambda x: (x[1], x[2]))
+                lvl_price = float(best_piv[0])
+            elif struct_anchors:
+                lvl_price = float(np.average([p for p, _ in struct_anchors], weights=[w for _, w in struct_anchors]))
+            else:
+                lvl_price = float(np.average([p for p, _, _, _, _ in cl], weights=[w for _, _, _, w, _ in cl]))
+
+            if abs(lvl_price - current_price) < min_dist_from_price:
+                continue
+
+            is_support_side = lvl_price < current_price
+            b_low = lvl_price - zone_half_width
+            b_high = lvl_price + zone_half_width
+
+            # Count TRUE closed-candle rejections (bars that tested the band and closed without breaking through)
+            touch_tol = zone_half_width * 1.35
+            if is_support_side:
+                sup_reject_mask = (lows <= b_high + touch_tol) & (lows >= b_low - touch_tol * 1.5) & (closes >= b_low)
+                flip_reject_mask = (highs >= b_low - touch_tol) & (highs <= b_high + touch_tol * 1.5) & (closes <= b_high)
+                valid_reject_mask = sup_reject_mask | flip_reject_mask
+                wick_sizes = np.where(sup_reject_mask, body_lows - lows, 0.0)
+            else:
+                res_reject_mask = (highs >= b_low - touch_tol) & (highs <= b_high + touch_tol * 1.5) & (closes <= b_high)
+                flip_reject_mask = (lows <= b_high + touch_tol) & (lows >= b_low - touch_tol * 1.5) & (closes >= b_low)
+                valid_reject_mask = res_reject_mask | flip_reject_mask
+                wick_sizes = np.where(res_reject_mask, highs - body_highs, 0.0)
+
+            rejection_bars = int(np.sum(valid_reject_mask))
+            recent_rejection_bars = int(np.sum(valid_reject_mask[-45:])) if n_closed >= 10 else rejection_bars
+            pivot_touches = len(pure_pivots)
+
+            if pivot_touches == 0 and rejection_bars == 0 and "Hacim POC" not in c_tags and "Balina OB" not in c_tags:
+                continue
+
+            # Module 2: Level-Specific Historical Reaction Backtest (5-bar forward bounce success rate & avg move %)
+            episode_indices: List[int] = []
+            last_ep = -10
+            for idx_b in range(2, max(3, n_closed - 3)):
+                if is_support_side:
+                    entered_zone = (lows[idx_b] <= b_high + touch_tol) and (highs[idx_b] >= b_low - touch_tol)
+                else:
+                    entered_zone = (highs[idx_b] >= b_low - touch_tol) and (lows[idx_b] <= b_high + touch_tol)
+                if entered_zone and (idx_b - last_ep) >= 4:
+                    episode_indices.append(idx_b)
+                    last_ep = idx_b
+
+            win_episodes = 0
+            bounce_pcts: List[float] = []
+            for ep_i in episode_indices:
+                end_h = min(n_closed, ep_i + 6)
+                if end_h <= ep_i + 1:
+                    continue
+                if is_support_side:
+                    # Did price bounce upward from support without closing decisively below b_low - 0.45*ATR?
+                    fwd_high = float(np.max(highs[ep_i : end_h]))
+                    fwd_min_close = float(np.min(closes[ep_i + 1 : end_h]))
+                    move_pct = max(0.0, (fwd_high - lvl_price) / max(lvl_price, 1e-9) * 100.0)
+                    held_zone = (closes[ep_i] >= b_low - 0.15 * atr_val) and (fwd_min_close >= b_low - 0.45 * atr_val)
+                    if held_zone and move_pct >= (0.35 * atr_val / max(lvl_price, 1e-9) * 100.0):
+                        win_episodes += 1
+                        bounce_pcts.append(move_pct)
+                else:
+                    fwd_low = float(np.min(lows[ep_i : end_h]))
+                    fwd_max_close = float(np.max(closes[ep_i + 1 : end_h]))
+                    move_pct = max(0.0, (lvl_price - fwd_low) / max(lvl_price, 1e-9) * 100.0)
+                    held_zone = (closes[ep_i] <= b_high + 0.15 * atr_val) and (fwd_max_close <= b_high + 0.45 * atr_val)
+                    if held_zone and move_pct >= (0.35 * atr_val / max(lvl_price, 1e-9) * 100.0):
+                        win_episodes += 1
+                        bounce_pcts.append(move_pct)
+
+            test_count = max(len(episode_indices), 1 if (pivot_touches > 0 or rejection_bars > 0) else 0)
+            reaction_count = max(win_episodes, 1 if pivot_touches > 0 and win_episodes == 0 else 0)
+            if reaction_count > test_count:
+                test_count = reaction_count
+            reaction_rate_pct = (reaction_count / max(test_count, 1)) * 100.0
+            avg_bounce_pct = float(np.mean(bounce_pcts)) if bounce_pcts else (float(0.85 * atr_val / max(lvl_price, 1e-9) * 100.0))
+            stats_summary_tr = f"{reaction_count}/{test_count} Başarılı Tepki (%{reaction_rate_pct:.0f}) • Ort. ±%{avg_bounce_pct:.2f}"
+
+            local_vol_ratio = (
+                float(np.nanmean(vols[valid_reject_mask])) / max(avg_vol, 1e-9)
+                if rejection_bars > 0
+                else 1.0
+            )
+            max_wick_atr = float(np.max(wick_sizes)) / max(atr_val, 1e-9) if len(wick_sizes) > 0 else 0.0
+
+            # Compute 0-100 Quantitative Strength Score grounded in real candle behavior + MTF Confluence
+            score_pts = 0.0
+            conf_reasons: List[str] = []
+
+            # Module 1: Check Higher-Timeframe (4H / 1D) Wall Confluence
+            htf_confirmed = False
+            htf_tag_tr = ""
+            if htf_sr_levels:
+                htf_tol = max(atr_val * 0.80, current_price * 0.0055)
+                for h_lvl in htf_sr_levels:
+                    if (b_low - htf_tol <= h_lvl.price <= b_high + htf_tol) or (
+                        h_lvl.band_low <= lvl_price <= h_lvl.band_high
+                    ):
+                        htf_confirmed = True
+                        htf_tag_tr = "🏛️ Üst Periyot (4H/1D) Duvar Onaylı"
+                        score_pts += 18.0
+                        conf_reasons.append("🏛️ Üst Periyot Duvarı")
+                        break
+
+            eff_touches = max(pivot_touches, min((rejection_bars + 1) // 2, 5), 1 if rejection_bars > 0 else 0)
+            if eff_touches >= 3:
+                score_pts += 46.0
+                conf_reasons.append(f"{eff_touches} Mum Tepkisi")
+            elif eff_touches == 2:
+                score_pts += 34.0
+                conf_reasons.append("2 Mum Tepkisi")
+            elif eff_touches == 1:
+                score_pts += 22.0
+                conf_reasons.append("Onaylı Pivot" if pivot_touches > 0 else "Mum Tepkisi")
+            else:
+                score_pts += 16.0
+
+            if reaction_count >= 2 and reaction_rate_pct >= 70.0:
+                score_pts += 6.0
+
+            if "Yakın Pivot" in c_tags or recent_rejection_bars >= 2:
+                score_pts += 10.0
+                if "Güncel Mum Testi" not in conf_reasons and len(conf_reasons) < 3:
+                    conf_reasons.append("Güncel Mum Testi")
+
+            if max_wick_atr >= 0.45:
+                score_pts += 8.0
+                conf_reasons.append("Güçlü İğne Reddi")
+
+            if "Ana Tepe/Dip" in c_tags:
+                score_pts += 16.0
+                if "Ana Dip/Tepe" not in conf_reasons:
+                    conf_reasons.append("Ana Dip/Tepe")
+            if "Hacim POC" in c_tags:
+                score_pts += 24.0
+                conf_reasons.append("Hacim Mıknatısı (POC)")
+            elif "Hacim VAL" in c_tags or "Hacim VAH" in c_tags:
+                score_pts += 14.0
+                conf_reasons.append("Hacim Kanal Sınırı")
+            if "Dip Maliyet (AVWAP)" in c_tags or "Tepe Maliyet (AVWAP)" in c_tags:
+                score_pts += 18.0
+                conf_reasons.append("Kurumsal Maliyet (AVWAP)")
+            if "EMA 200" in c_tags:
+                score_pts += 18.0
+                conf_reasons.append("EMA 200")
+            if "Balina OB" in c_tags:
+                score_pts += 22.0
+                conf_reasons.append("Balina Emir Kutusu")
+            if "Alış Duvarı" in c_tags or "Satış Duvarı" in c_tags:
+                score_pts += 20.0
+                conf_reasons.append("Canlı Borsa Duvarı")
+            if "Fib 0.618" in c_tags:
+                score_pts += 15.0
+                conf_reasons.append("Altın Oran (Fib 0.618)")
+            elif "Fib 0.382" in c_tags:
+                score_pts += 9.0
+                conf_reasons.append("Fib 0.382")
+            if local_vol_ratio >= 1.25:
+                score_pts += 12.0
+                conf_reasons.append(f"Yüksek Hacim ({local_vol_ratio:.1f}x)")
+
+            strength_score = float(np.clip(score_pts, 25.0, 98.0))
+            if (len(conf_reasons) >= 3 and eff_touches >= 2) or htf_confirmed:
+                if strength_score < 58.0:
+                    strength_score = 58.0
+            is_strong = strength_score >= 58.0
+            short_reasons = " + ".join(conf_reasons[:2]) if conf_reasons else "Teknik Seviye"
+
+            if is_support_side:
+                tier_tr = "🛡️ Güçlü Destek" if is_strong else "🟢 Destek"
+                strength_lbl = f"{tier_tr} (Güç: {strength_score:.0f}/100 • {short_reasons})"
+                raw_supports.append(
                     SupportResistanceLevel(
                         price=lvl_price,
-                        band_low=lvl_price - zone_half_width,
-                        band_high=lvl_price + zone_half_width,
+                        band_low=b_low,
+                        band_high=b_high,
                         level_type="DESTEK",
-                        touches=touches,
-                        strength_label=strength,
+                        touches=max(eff_touches, 1),
+                        strength_label=strength_lbl,
+                        is_strong=is_strong,
+                        strength_score=strength_score,
+                        tier_tr=tier_tr,
+                        confluence_tags=conf_reasons,
+                        htf_confirmed=htf_confirmed,
+                        htf_tag_tr=htf_tag_tr,
+                        reaction_count=reaction_count,
+                        test_count=test_count,
+                        reaction_rate_pct=reaction_rate_pct,
+                        avg_bounce_pct=avg_bounce_pct,
+                        stats_summary_tr=stats_summary_tr,
                     )
                 )
-            elif lvl_price > current_price * 1.0015:
-                strength = f"Güçlü Direnç ({touches} Onay{tag_suffix})" if touches >= 2 or special_tags else "Yakın Direnç"
-                resistances.append(
+            else:
+                tier_tr = "🧱 Güçlü Direnç" if is_strong else "🔴 Direnç"
+                strength_lbl = f"{tier_tr} (Güç: {strength_score:.0f}/100 • {short_reasons})"
+                raw_resistances.append(
                     SupportResistanceLevel(
                         price=lvl_price,
-                        band_low=lvl_price - zone_half_width,
-                        band_high=lvl_price + zone_half_width,
+                        band_low=b_low,
+                        band_high=b_high,
                         level_type="DİRENÇ",
-                        touches=touches,
-                        strength_label=strength,
+                        touches=max(eff_touches, 1),
+                        strength_label=strength_lbl,
+                        is_strong=is_strong,
+                        strength_score=strength_score,
+                        tier_tr=tier_tr,
+                        confluence_tags=conf_reasons,
+                        htf_confirmed=htf_confirmed,
+                        htf_tag_tr=htf_tag_tr,
+                        reaction_count=reaction_count,
+                        test_count=test_count,
+                        reaction_rate_pct=reaction_rate_pct,
+                        avg_bounce_pct=avg_bounce_pct,
+                        stats_summary_tr=stats_summary_tr,
                     )
                 )
 
-        supports.sort(key=lambda x: abs(x.price - current_price))
-        resistances.sort(key=lambda x: abs(x.price - current_price))
+        # Sort by distance to current_price and enforce minimum ATR separation so 1st & 2nd zones never overlap
+        raw_supports.sort(key=lambda x: abs(x.price - current_price))
+        raw_resistances.sort(key=lambda x: abs(x.price - current_price))
+        min_level_gap = max(atr_val * 0.72, zone_half_width * 2.35, current_price * 0.0052)
+
+        def _dedup_levels(levels: List[SupportResistanceLevel]) -> List[SupportResistanceLevel]:
+            selected: List[SupportResistanceLevel] = []
+            for cand in levels:
+                if not selected:
+                    selected.append(cand)
+                    continue
+                prev = selected[-1]
+                if abs(cand.price - prev.price) < min_level_gap:
+                    if cand.strength_score > prev.strength_score + 6.0:
+                        selected[-1] = cand
+                else:
+                    selected.append(cand)
+                if len(selected) >= max_levels:
+                    break
+            return selected
+
+        supports = _dedup_levels(raw_supports)
+        resistances = _dedup_levels(raw_resistances)
+
+        ext_step = max(atr_val * 1.45, min_level_gap * 1.25, current_price * 0.011)
+        while len(supports) < min(2, max_levels):
+            base_p = supports[-1].price if supports else current_price
+            ext_p = float(base_p - ext_step)
+            if ext_p <= 0:
+                break
+            supports.append(
+                SupportResistanceLevel(
+                    price=ext_p,
+                    band_low=ext_p - zone_half_width,
+                    band_high=ext_p + zone_half_width,
+                    level_type="DESTEK",
+                    touches=1,
+                    strength_label="🟢 Destek (Güç: 42/100 • Alt Kanal ATR Uzatması)",
+                    is_strong=False,
+                    strength_score=42.0,
+                    tier_tr="🟢 Destek",
+                    confluence_tags=["Alt Kanal ATR Uzatması"],
+                    stats_summary_tr="Volatilite Uzatma Hedefi",
+                )
+            )
+
+        while len(resistances) < min(2, max_levels):
+            base_p = resistances[-1].price if resistances else current_price
+            ext_p = float(base_p + ext_step)
+            resistances.append(
+                SupportResistanceLevel(
+                    price=ext_p,
+                    band_low=ext_p - zone_half_width,
+                    band_high=ext_p + zone_half_width,
+                    level_type="DİRENÇ",
+                    touches=1,
+                    strength_label="🔴 Direnç (Güç: 42/100 • Üst Kanal ATR Uzatması)",
+                    is_strong=False,
+                    strength_score=42.0,
+                    tier_tr="🔴 Direnç",
+                    confluence_tags=["Üst Kanal ATR Uzatması"],
+                    stats_summary_tr="Volatilite Uzatma Hedefi",
+                )
+            )
+
         return supports[:max_levels], resistances[:max_levels]
+
+    @staticmethod
+    def detect_retest_and_sfp(
+        closed_df: pd.DataFrame,
+        live_close: float,
+        supports: List[SupportResistanceLevel],
+        resistances: List[SupportResistanceLevel],
+        atr_val: float,
+    ) -> Tuple[str, str, float, Optional[pd.Timestamp], float]:
+        """
+        Module 3: Detects Confirmed S/R Flip Retests and Swing Failure Patterns (SFP / Trap Fakeouts)
+        on the most recent closed candles (`closed_df.tail(5)`).
+        Returns: (action_type, status_tr, trigger_price, trigger_timestamp, score_boost)
+        """
+        if len(closed_df) < 10:
+            return "NONE", "Aktif Kırılım Testi (Retest) veya Tuzak (SFP) Yok", 0.0, None, 0.0
+
+        recent = closed_df.tail(5)
+        p_fmt = ",.4f" if live_close < 10.0 else ",.2f"
+
+        # 1. Check Bullish SFP (Bear Trap) & Bullish S/R Flip Retest at 1st Support
+        if supports:
+            sup = supports[0]
+            for _, row in recent.iloc[::-1].iterrows():
+                lo_v = float(row["low"])
+                cl_v = float(row["close"])
+                op_v = float(row["open"])
+                ts_v = row["timestamp"] if "timestamp" in row else None
+                lower_wick = min(op_v, cl_v) - lo_v
+
+                # Bullish SFP: Wick swept below support price (or band_low), closed back above support price!
+                if lo_v < sup.price - 0.05 * atr_val and cl_v >= sup.price and lower_wick >= 0.30 * atr_val and live_close >= sup.band_low:
+                    return (
+                        "BULL_SFP",
+                        f"🪤 Boğa SFP (Ayı Tuzağı Avı): Fiyat {format(sup.price, p_fmt)} Desteği Altındaki Stopları Süpürüp Üzerinde Kapattı!",
+                        float(lo_v),
+                        ts_v,
+                        16.0,
+                    )
+
+                # Bullish Retest (S/R Flip): Low tested support band [band_low, band_high + 0.25*ATR] and closed bullishly above band_high
+                if (sup.band_low - 0.15 * atr_val) <= lo_v <= (sup.band_high + 0.28 * atr_val) and cl_v >= op_v and cl_v >= sup.price and live_close >= sup.price:
+                    return (
+                        "BULL_RETEST",
+                        f"🔄 Onaylı Destek Testi (Retest): Fiyat {format(sup.price, p_fmt)} ({sup.tier_tr}) Bölgesini Test Edip Alıcı Onayı Aldı",
+                        float(sup.price),
+                        ts_v,
+                        12.0,
+                    )
+
+        # 2. Check Bearish SFP (Bull Trap) & Bearish S/R Flip Retest at 1st Resistance
+        if resistances:
+            res = resistances[0]
+            for _, row in recent.iloc[::-1].iterrows():
+                hi_v = float(row["high"])
+                cl_v = float(row["close"])
+                op_v = float(row["open"])
+                ts_v = row["timestamp"] if "timestamp" in row else None
+                upper_wick = hi_v - max(op_v, cl_v)
+
+                # Bearish SFP: Wick spiked above resistance price, closed back below resistance price!
+                if hi_v > res.price + 0.05 * atr_val and cl_v <= res.price and upper_wick >= 0.30 * atr_val and live_close <= res.band_high:
+                    return (
+                        "BEAR_SFP",
+                        f"🪤 Ayı SFP (Boğa Tuzağı Avı): Fiyat {format(res.price, p_fmt)} Direnci Üstündeki Stopları Süpürüp Altında Kapattı!",
+                        float(hi_v),
+                        ts_v,
+                        -16.0,
+                    )
+
+                # Bearish Retest: High tested resistance band and closed bearishly below resistance price
+                if (res.band_low - 0.28 * atr_val) <= hi_v <= (res.band_high + 0.15 * atr_val) and cl_v <= op_v and cl_v <= res.price and live_close <= res.price:
+                    return (
+                        "BEAR_RETEST",
+                        f"🔄 Onaylı Direnç Reddi (Retest): Fiyat {format(res.price, p_fmt)} ({res.tier_tr}) Tavanını Test Edip Satıcı Reddi Yedi",
+                        float(res.price),
+                        ts_v,
+                        -12.0,
+                    )
+
+        return "NONE", "Aktif Kırılım Testi (Retest) veya Tuzak (SFP) Yok", 0.0, None, 0.0
+
+    @staticmethod
+    def detect_dynamic_trendlines(
+        closed_df: pd.DataFrame,
+        live_close: float,
+        atr_val: float,
+    ) -> Tuple[DynamicTrendlineReport, float]:
+        """
+        Module 4: Automatic Dynamic Ascending Support & Descending Resistance Trendline & Breakout Engine.
+        Connects confirmed closed-candle swing pivots over the last 95 bars and detects live trendline breakouts.
+        """
+        report = DynamicTrendlineReport()
+        if len(closed_df) < 25:
+            return report, 0.0
+
+        sub = closed_df.tail(min(len(closed_df), 95)).reset_index(drop=True)
+        n = len(sub)
+        highs = sub["high"].to_numpy(dtype=float)
+        lows = sub["low"].to_numpy(dtype=float)
+        closes = sub["close"].to_numpy(dtype=float)
+        ts_arr = sub["timestamp"].tolist() if "timestamp" in sub.columns else list(range(n))
+        p_fmt = ",.4f" if live_close < 10.0 else ",.2f"
+
+        piv_win = 4
+        swing_lows: List[Tuple[int, float]] = []
+        swing_highs: List[Tuple[int, float]] = []
+        for i in range(piv_win, n - 2):
+            r_w = min(piv_win, n - 1 - i)
+            if lows[i] <= np.min(lows[i - piv_win : i + r_w + 1]) + 1e-12:
+                if not swing_lows or (i - swing_lows[-1][0]) >= 5:
+                    swing_lows.append((i, float(lows[i])))
+            if highs[i] >= np.max(highs[i - piv_win : i + r_w + 1]) - 1e-12:
+                if not swing_highs or (i - swing_highs[-1][0]) >= 5:
+                    swing_highs.append((i, float(highs[i])))
+
+        # 1. Fit Ascending Support Trendline (connecting rising swing lows)
+        best_sup_pair = None
+        for idx_a in range(len(swing_lows) - 1):
+            for idx_b in range(idx_a + 1, len(swing_lows)):
+                i1, p1 = swing_lows[idx_a]
+                i2, p2 = swing_lows[idx_b]
+                if (i2 - i1) < 8 or p2 <= p1:
+                    continue
+                slope = (p2 - p1) / float(i2 - i1)
+                # Ensure intermediate closed candle bodies mostly stayed above the line
+                line_vals = np.array([p1 + slope * (k - i1) for k in range(i1, n - 1)])
+                violations = int(np.sum(closes[i1 : n - 1] < line_vals - 0.35 * atr_val))
+                if violations <= 1:
+                    best_sup_pair = (i1, p1, i2, p2, slope)
+
+        if best_sup_pair is not None:
+            i1, p1, i2, p2, slope = best_sup_pair
+            y_now = float(p1 + slope * (n - 1 - i1))
+            if y_now > 0 and abs(y_now - live_close) / max(live_close, 1e-9) <= 0.15:
+                report.has_support_line = True
+                report.sup_x0 = ts_arr[i1]
+                report.sup_y0 = float(p1)
+                report.sup_x1 = ts_arr[-1]
+                report.sup_y1 = y_now
+                report.sup_current_price = y_now
+
+        # 2. Fit Descending Resistance Trendline (connecting falling swing highs)
+        best_res_pair = None
+        for idx_a in range(len(swing_highs) - 1):
+            for idx_b in range(idx_a + 1, len(swing_highs)):
+                i1, p1 = swing_highs[idx_a]
+                i2, p2 = swing_highs[idx_b]
+                if (i2 - i1) < 8 or p2 >= p1:
+                    continue
+                slope = (p2 - p1) / float(i2 - i1)
+                line_vals = np.array([p1 + slope * (k - i1) for k in range(i1, n - 1)])
+                violations = int(np.sum(closes[i1 : n - 1] > line_vals + 0.35 * atr_val))
+                if violations <= 1:
+                    best_res_pair = (i1, p1, i2, p2, slope)
+
+        if best_res_pair is not None:
+            i1, p1, i2, p2, slope = best_res_pair
+            y_now = float(p1 + slope * (n - 1 - i1))
+            if y_now > 0 and abs(y_now - live_close) / max(live_close, 1e-9) <= 0.15:
+                report.has_resistance_line = True
+                report.res_x0 = ts_arr[i1]
+                report.res_y0 = float(p1)
+                report.res_x1 = ts_arr[-1]
+                report.res_y1 = y_now
+                report.res_current_price = y_now
+
+        # 3. Evaluate Dynamic Trendline Breakouts / Breakdowns on the latest closed bar
+        trend_boost = 0.0
+        last_cl = float(closes[-1])
+        prev_cl = float(closes[-2]) if n >= 2 else last_cl
+
+        if report.has_resistance_line and prev_cl <= report.res_current_price * 1.002 and last_cl > report.res_current_price + 0.10 * atr_val and live_close > report.res_current_price:
+            report.breakout_status = "BULL_BREAKOUT"
+            report.summary_tr = f"📐 🟢 DÜŞEN TREND YUKARI KIRILDI! (Kırılım Seviyesi: {format(report.res_current_price, p_fmt)} USDT)"
+            trend_boost = 15.0
+        elif report.has_support_line and prev_cl >= report.sup_current_price * 0.998 and last_cl < report.sup_current_price - 0.10 * atr_val and live_close < report.sup_current_price:
+            report.breakout_status = "BEAR_BREAKDOWN"
+            report.summary_tr = f"📐 🔴 YÜKSELEN TREND AŞAĞI KIRILDI! (Kırılan Trend Desteği: {format(report.sup_current_price, p_fmt)} USDT)"
+            trend_boost = -15.0
+        elif report.has_support_line and report.has_resistance_line and report.sup_current_price < live_close < report.res_current_price:
+            report.breakout_status = "CONVERGING_SQUEEZE"
+            report.summary_tr = (
+                f"📐 Üçgen / Trend Sıkışması: Yükselen Destek {format(report.sup_current_price, p_fmt)} | "
+                f"Düşen Direnç {format(report.res_current_price, p_fmt)} USDT"
+            )
+        elif report.has_resistance_line:
+            report.summary_tr = f"📐 Düşen Trend Direnci Aktif: {format(report.res_current_price, p_fmt)} USDT"
+        elif report.has_support_line:
+            report.summary_tr = f"📐 Yükselen Trend Desteği Aktif: {format(report.sup_current_price, p_fmt)} USDT"
+
+        return report, trend_boost
 
     def generate_forecast(
         self,
@@ -801,6 +1382,7 @@ class SignalEngine:
         btc_df: Optional[pd.DataFrame] = None,
         sample_capital_usd: float = 1000.0,
         risk_pct: float = 1.0,
+        htf_sr_levels: Optional[List[SupportResistanceLevel]] = None,
     ) -> MarketForecast:
         """
         Compute a 6-Layer Dynamic Regime-Weighted Quantitative Forecast (v3.0):
@@ -1030,9 +1612,47 @@ class SignalEngine:
         else:
             bb_status_tr = f"Bollinger Denge Kanalında (%B: %{pct_b*100:.0f}){squeeze_tag}"
 
-        supports, resistances = self.detect_support_resistance(df)
+        # Pre-compute SMC structure events & Order Blocks for Layer 4 + S/R strength scoring
+        smc_engine = SmartMoneyEngine()
+        smc_events, _, _ = smc_engine.detect_structure_and_sweeps(df)
+        smc_obs = smc_engine.detect_order_blocks(df)
+
+        supports, resistances = self.detect_support_resistance(
+            df,
+            window=6,
+            max_levels=3,
+            order_flow=order_flow,
+            order_blocks=smc_obs,
+            htf_sr_levels=htf_sr_levels,
+        )
         nearest_sup = supports[0].price if supports else (live_close - 2.0 * atr_val)
         nearest_res = resistances[0].price if resistances else (live_close + 2.0 * atr_val)
+        sup_tier_tr = supports[0].tier_tr if supports else "🟢 Destek"
+        sup_score = supports[0].strength_score if supports else 42.0
+        sup_reason_tr = " + ".join(supports[0].confluence_tags[:2]) if (supports and supports[0].confluence_tags) else "Ara Pivot"
+        res_tier_tr = resistances[0].tier_tr if resistances else "🔴 Direnç"
+        res_score = resistances[0].strength_score if resistances else 42.0
+        res_reason_tr = " + ".join(resistances[0].confluence_tags[:2]) if (resistances and resistances[0].confluence_tags) else "Ara Pivot"
+        strongest_sup_obj = max(supports, key=lambda x: x.strength_score) if supports else None
+        strongest_res_obj = max(resistances, key=lambda x: x.strength_score) if resistances else None
+
+        # Module 3: Detect Confirmed S/R Flip Retests & SFP Traps on Closed Candles
+        sr_action_type, sr_action_status_tr, sr_action_price, sr_action_time, sr_action_boost = self.detect_retest_and_sfp(
+            closed_df=closed_df,
+            live_close=live_close,
+            supports=supports,
+            resistances=resistances,
+            atr_val=atr_val,
+        )
+        s_score += sr_action_boost
+
+        # Module 4: Detect Automatic Dynamic Trendlines & Trendline Breakouts on Closed Candles
+        trendlines, trendline_boost = self.detect_dynamic_trendlines(
+            closed_df=closed_df,
+            live_close=live_close,
+            atr_val=atr_val,
+        )
+        t_score = float(np.clip(t_score + trendline_boost, -100.0, 100.0))
 
         dist_to_sup = max(live_close - nearest_sup, atr_val * 0.1)
         dist_to_res = max(nearest_res - live_close, atr_val * 0.1)
@@ -1042,9 +1662,6 @@ class SignalEngine:
         elif rr_ratio <= 0.58:
             s_score -= 18.0
 
-        # Pre-compute SMC structure events for Layer 4 scoring
-        smc_engine = SmartMoneyEngine()
-        smc_events, _, _ = smc_engine.detect_structure_and_sweeps(df)
         if smc_events:
             last_ev = smc_events[-1]
             if last_ev.event_type in ("BULL_BOS", "BULL_CHOCH", "BULL_SWEEP"):
@@ -1302,6 +1919,56 @@ class SignalEngine:
                 f"Dalga Boyu: ±%{expected_breakout_move_pct:.1f}"
             )
 
+        # ==================================================================
+        # BUILD PERPETUAL FUTURES SETUP FIRST SO TARGETS, STOPS, RISK PLAN &
+        # 5-CRITERIA READINESS ARE 100% SYNCHRONIZED (ZERO CONTRADICTION)
+        # ==================================================================
+        futures_setup = self._build_futures_setup_report(
+            live_close=live_close,
+            composite=composite,
+            t_score=t_score,
+            mf_score=mf_score,
+            htf_score=htf_score,
+            chop_val=chop_val,
+            hurst_val=hurst_val,
+            atr_val=atr_val,
+            ema20=ema20,
+            kalman_price=kalman_price,
+            poc_price=poc_price,
+            vah_price=vah_price,
+            val_price=val_price,
+            avwap_low_p=avwap_low_p,
+            avwap_high_p=avwap_high_p,
+            nearest_sup=nearest_sup,
+            nearest_res=nearest_res,
+            supports=supports,
+            resistances=resistances,
+            cmf_val=cmf_val,
+            whale_score=whale_accumulation_score,
+            squeeze_pct=squeeze_energy_pct,
+            smc_report=smc_report,
+            order_flow=order_flow,
+            sr_action_type=sr_action_type,
+            sr_action_status_tr=sr_action_status_tr,
+            trendlines=trendlines,
+        )
+
+        # Synchronize canonical TP1 / TP2 / Stop & Risk Plan with Futures Setup when a valid setup exists
+        if futures_setup and futures_setup.direction in ("LONG", "SHORT") and futures_setup.tp1_price > 0 and futures_setup.stop_price > 0:
+            tp1_price = futures_setup.tp1_price
+            tp2_price = futures_setup.tp2_price
+            stop_price = futures_setup.stop_price
+            if futures_setup.is_tradeable:
+                active_direction = "BULLISH" if futures_setup.direction == "LONG" else "BEARISH"
+            risk_plan = smc_engine.calculate_position_sizing(
+                entry_price=futures_setup.entry_price if futures_setup.entry_price > 0 else live_close,
+                stop_price=stop_price,
+                target_price=tp2_price,
+                capital_usd=sample_capital_usd,
+                risk_pct=risk_pct,
+                win_prob_pct=effective_win_prob,
+            )
+
         # 3-Step Action & Alarm Level Guide (Step A: Breakout, Step B: Pullback/Support, Step C: Invalidation)
         pullback_zone = max(nearest_sup, min(poc_price, avwap_low_p)) if nearest_sup < live_close else nearest_sup
         breakout_lvl = max(bull_trigger, kalman_price) if composite >= 0 else min(nearest_sup, kalman_price)
@@ -1359,39 +2026,40 @@ class SignalEngine:
             else f"Dikkat: Piyasa şu an dar alanda testere/sıkışma içinde (CHOP: {chop_val:.1f})."
         )
 
-        active_rr = risk_plan.risk_reward_ratio if risk_plan else 1.0
-        chk5_ok = active_rr >= 1.25
-        chk5_desc = (
-            f"Hedef kazanç mesafesi, Stop mesafesinin {active_rr:.2f} katı (Avantajlı R:R)."
-            if chk5_ok
-            else f"Hedef mesafesi Stop mesafesine göre dar ({active_rr:.2f}R < 1.25R)."
-        )
+        active_rr = futures_setup.rr_ratio if (futures_setup and futures_setup.rr_ratio > 0) else (risk_plan.risk_reward_ratio if risk_plan else 1.0)
+        chk5_ok = bool(futures_setup and futures_setup.is_tradeable and active_rr >= 1.35)
+        if chk5_ok:
+            chk5_desc = f"Destek/Direnç önü açık ve Kazanç/Risk oranı avantajlı (1:{active_rr:.2f})."
+        elif futures_setup and futures_setup.risk_warnings_tr:
+            chk5_desc = futures_setup.risk_warnings_tr[0]
+        else:
+            chk5_desc = f"Hedef mesafesi Stop mesafesine göre dar ({active_rr:.2f}R < 1.35R) veya direnç/destek çok yakın."
 
         readiness_checks: List[Tuple[str, bool, str]] = [
             ("1. Yön & Trend Netliği", bool(chk1_ok), chk1_desc),
             ("2. Üst Zaman Dilimi (Ana Akıntı) Uyumu", bool(chk2_ok), chk2_desc),
             ("3. Gerçek Nakit & Balina Desteği", bool(chk3_ok), chk3_desc),
             ("4. Testere / Sıkışma Filtresi", bool(chk4_ok), chk4_desc),
-            ("5. Kazanç / Risk Mesafesi (R:R)", bool(chk5_ok), chk5_desc),
+            ("5. Destek/Direnç Alanı & R:R Oranı", bool(chk5_ok), chk5_desc),
         ]
         readiness_score_5 = sum(1 for _, ok, _ in readiness_checks if ok)
-        if readiness_score_5 >= 4 and abs(composite) >= 18.0:
-            readiness_verdict_tr = f"🟢 YÜKSEK KALİTELİ KURULUM ({readiness_score_5}/5 Kriter Onaylı — Şartlar Olgun)"
-        elif readiness_score_5 == 3 and abs(composite) >= 15.0:
-            readiness_verdict_tr = f"🟡 ORTA KALİTELİ KURULUM ({readiness_score_5}/5 Kriter Onaylı — Kademeli/Temkinli İzlenmeli)"
+        if futures_setup and futures_setup.is_tradeable and readiness_score_5 >= 4:
+            readiness_verdict_tr = f"🟢 YÜKSEK KALİTELİ KURULUM ({readiness_score_5}/5 Kriter Onaylı — Vadeli Güven: {futures_setup.confidence_score:.0f}/100)"
+        elif futures_setup and futures_setup.is_tradeable and readiness_score_5 >= 3:
+            readiness_verdict_tr = f"🟡 ORTA KALİTELİ KURULUM ({readiness_score_5}/5 Kriter Onaylı — Vadeli Güven: {futures_setup.confidence_score:.0f}/100)"
         else:
-            readiness_verdict_tr = f"🔴 BEKLE-GÖR BÖLGESİ ({readiness_score_5}/5 Kriter Onaylı — İşlem İçin Erken / Riskli)"
+            readiness_verdict_tr = f"🔴 BEKLE-GÖR / RİSK KALKANI AKTİF ({readiness_score_5}/5 Kriter Onaylı — Şu An İşlem Önerilmez)"
 
         bullish_scenario_tr = (
             f"Fiyat {sup_str} destek bölgesi (Mıknatıs POC: {poc_str} | Dip Alıcı Maliyeti: {format(avwap_low_p, p_fmt)}) üzerinde tutunduğu sürece; "
-            f"<b>1. Güvenli Kâr Hedefi (TP1): {format(bull_tp1, p_fmt)} USDT</b>, "
-            f"<b>2. Ana Yükseliş Hedefi (TP2): {format(bull_target, p_fmt)} USDT</b> bölgesidir "
+            f"<b>1. Güvenli Kâr Hedefi (TP1): {format(tp1_price if composite >= 0 else bull_tp1, p_fmt)} USDT</b>, "
+            f"<b>2. Ana Yükseliş Hedefi (TP2): {format(tp2_price if composite >= 0 else bull_target, p_fmt)} USDT</b> bölgesidir "
             f"(Hedefe Temas İhtimali: ~%{prob_bull_pct:.0f} | Stop'tan Önce Hedef Olasılığı: ~%{prob_win_first:.0f})."
         )
         bearish_scenario_tr = (
-            f"Fiyat {sup_str} desteğini hacimli aşağı kırarsa (<b>Yükseliş Zarar-Kes / Stop Sınırı: {format(bear_invalidation, p_fmt)} USDT</b> | "
-            f"Temas Riski: ~%{prob_bear_pct:.0f}), düşüşte <b>1. Hedef (TP1): {format(bear_tp1, p_fmt)} USDT</b> ve "
-            f"<b>2. Ana Düşüş Hedefi (TP2): {format(bear_target, p_fmt)} USDT</b> talep bölgesidir (Düşüş Stop Eşiği: {format(short_stop, p_fmt)} USDT)."
+            f"Fiyat {sup_str} desteğini hacimli aşağı kırarsa (<b>Yükseliş Zarar-Kes / Stop Sınırı: {format(stop_price if composite >= 0 else bear_invalidation, p_fmt)} USDT</b> | "
+            f"Temas Riski: ~%{prob_bear_pct:.0f}), düşüşte <b>1. Hedef (TP1): {format(tp1_price if composite < 0 else bear_tp1, p_fmt)} USDT</b> ve "
+            f"<b>2. Ana Düşüş Hedefi (TP2): {format(tp2_price if composite < 0 else bear_target, p_fmt)} USDT</b> talep bölgesidir (Düşüş Stop Eşiği: {format(stop_price if composite < 0 else short_stop, p_fmt)} USDT)."
         )
 
         if composite >= 15.0:
@@ -1411,33 +2079,6 @@ class SignalEngine:
                 f"Faktörler arasında denge/kararsızlık hakim (Bileşik Endeks: {composite:+.0f}/100). "
                 f"{sup_str} desteği ile {res_str} direnci arasındaki kırılım yönü tayin edecektir. {bt_stats.summary_tr} (YTD)."
             )
-
-        futures_setup = self._build_futures_setup_report(
-            live_close=live_close,
-            composite=composite,
-            t_score=t_score,
-            mf_score=mf_score,
-            htf_score=htf_score,
-            chop_val=chop_val,
-            hurst_val=hurst_val,
-            atr_val=atr_val,
-            ema20=ema20,
-            kalman_price=kalman_price,
-            poc_price=poc_price,
-            vah_price=vah_price,
-            val_price=val_price,
-            avwap_low_p=avwap_low_p,
-            avwap_high_p=avwap_high_p,
-            nearest_sup=nearest_sup,
-            nearest_res=nearest_res,
-            supports=supports,
-            resistances=resistances,
-            cmf_val=cmf_val,
-            whale_score=whale_accumulation_score,
-            squeeze_pct=squeeze_energy_pct,
-            smc_report=smc_report,
-            order_flow=order_flow,
-        )
 
         return MarketForecast(
             score=composite,
@@ -1473,6 +2114,14 @@ class SignalEngine:
             fib_618_price=fib_618_price,
             nearest_support=nearest_sup,
             nearest_resistance=nearest_res,
+            nearest_support_tier_tr=sup_tier_tr,
+            nearest_support_score=sup_score,
+            nearest_support_reason_tr=sup_reason_tr,
+            nearest_resistance_tier_tr=res_tier_tr,
+            nearest_resistance_score=res_score,
+            nearest_resistance_reason_tr=res_reason_tr,
+            strongest_support=strongest_sup_obj.price if strongest_sup_obj else nearest_sup,
+            strongest_resistance=strongest_res_obj.price if strongest_res_obj else nearest_res,
             atr_value=atr_val,
             bullish_trigger_price=bull_trigger,
             bullish_target_price=bull_target,
@@ -1513,6 +2162,12 @@ class SignalEngine:
             resistance_levels=resistances,
             divergences=divergences,
             factor_notes_tr=notes,
+            sr_action_type=sr_action_type,
+            sr_action_status_tr=sr_action_status_tr,
+            sr_action_price=sr_action_price,
+            sr_action_time=sr_action_time,
+            leverage_squeeze_status_tr=futures_setup.leverage_squeeze_status_tr if futures_setup else "Normal Kaldıraç Dengesi",
+            trendlines=trendlines,
         )
 
     @staticmethod
@@ -1541,6 +2196,9 @@ class SignalEngine:
         squeeze_pct: float,
         smc_report: SmartMoneyReport,
         order_flow: Optional[OrderFlowIntel] = None,
+        sr_action_type: str = "NONE",
+        sr_action_status_tr: str = "",
+        trendlines: Optional[DynamicTrendlineReport] = None,
     ) -> FuturesSetupReport:
         """
         Institutional Perpetual Futures (Vadeli İşlemler) Setup, Confidence & Hard Risk Gate Engine (v8.0).
@@ -1573,20 +2231,59 @@ class SignalEngine:
                     long_liq_price = lp.price
 
         # 1. Determine Candidate Direction ("LONG", "SHORT", or "NO_TRADE")
+        tl_status = trendlines.breakout_status if trendlines is not None else "NONE"
         cand_dir = "NO_TRADE"
         if composite >= 15.0:
             cand_dir = "LONG"
         elif composite <= -15.0:
             cand_dir = "SHORT"
-        elif composite >= 10.0 and ("BULL_SWEEP" in last_ev_type or "BULL_CHOCH" in last_ev_type) and mf_score > 10.0:
+        elif composite >= 8.0 and (
+            "BULL_SWEEP" in last_ev_type
+            or "BULL_CHOCH" in last_ev_type
+            or sr_action_type in ("BULL_SFP", "BULL_RETEST")
+            or tl_status == "BULL_BREAKOUT"
+        ) and mf_score >= 5.0:
             cand_dir = "LONG"
-        elif composite <= -10.0 and ("BEAR_SWEEP" in last_ev_type or "BEAR_CHOCH" in last_ev_type) and mf_score < -10.0:
+        elif composite <= -8.0 and (
+            "BEAR_SWEEP" in last_ev_type
+            or "BEAR_CHOCH" in last_ev_type
+            or sr_action_type in ("BEAR_SFP", "BEAR_RETEST")
+            or tl_status == "BEAR_BREAKDOWN"
+        ) and mf_score <= -5.0:
             cand_dir = "SHORT"
 
         if cand_dir == "NO_TRADE":
             veto_reasons.append(
                 f"Yön belirsizliği var (Genel Puan: {composite:+.0f}/100); alıcı ve satıcılar dengede olduğu için vadeli işlemde stop olma riski yüksek."
             )
+
+        # Module 5: Perpetual Futures Short Squeeze / Long Squeeze (Kaldıraç Sıkıştırma) Detection
+        fr_pct = (order_flow.funding_rate_pct or 0.0) if order_flow is not None else 0.0
+        oi_1h = (order_flow.oi_change_1h_pct or 0.0) if order_flow is not None else 0.0
+        oi_24h = (order_flow.oi_change_24h_pct or 0.0) if order_flow is not None else 0.0
+        t_ratio = (order_flow.futures_taker_buy_sell_ratio or 1.0) if order_flow is not None else 1.0
+
+        is_short_squeeze = (
+            (fr_pct <= -0.005 or (oi_1h >= 0.5 and t_ratio >= 1.04))
+            and (cmf_val >= 0.01 or whale_score >= 53.0 or composite >= 12.0)
+        )
+        is_long_squeeze = (
+            (fr_pct >= 0.025 or (oi_1h >= 0.5 and t_ratio <= 0.96))
+            and (cmf_val <= -0.01 or whale_score <= 47.0 or composite <= -12.0)
+        )
+
+        if is_short_squeeze:
+            leverage_squeeze_status_tr = (
+                f"🔥 SHORT SQUEEZE (Şort Patlatma) POTANSİYELİ (Fonlama: %{fr_pct:+.4f} | Taker Alım: {t_ratio:.2f}x) — "
+                f"Direnç üstündeki açık Short pozisyonlar yukarı kırılımı hızlandırabilir!"
+            )
+        elif is_long_squeeze:
+            leverage_squeeze_status_tr = (
+                f"⚠️ LONG SQUEEZE (Long Tasfiye) RİSKİ (Fonlama: %{fr_pct:+.4f} | Taker Oranı: {t_ratio:.2f}x) — "
+                f"Destek altındaki kalabalık Long stopları sert satış iğnesi tetikleyebilir!"
+            )
+        else:
+            leverage_squeeze_status_tr = f"⚖️ Dengeli Kaldıraç Yapısı (Fonlama: %{fr_pct:+.4f} | Taker: {t_ratio:.2f}x)"
 
         # 2. Support / Resistance Geometry, Entry Mode, Stop-Hunt Protected Stop & Staged TP1/TP2/TP3
         sup_safe = nearest_sup if (nearest_sup and nearest_sup < live_close) else (live_close - 1.3 * atr_safe)
@@ -1597,6 +2294,15 @@ class SignalEngine:
         dist_to_sup_pct = max((live_close - sup_safe) / max(live_close, 1e-9) * 100.0, 0.05)
         dist_to_res_pct = max((res_safe - live_close) / max(live_close, 1e-9) * 100.0, 0.05)
 
+        sup1_tier = supports[0].tier_tr if supports else "🟢 Destek"
+        sup1_strong = bool(supports[0].is_strong) if supports else False
+        sup1_score = float(supports[0].strength_score) if supports else 45.0
+        sup1_htf = bool(getattr(supports[0], "htf_confirmed", False)) if supports else False
+        res1_tier = resistances[0].tier_tr if resistances else "🔴 Direnç"
+        res1_strong = bool(resistances[0].is_strong) if resistances else False
+        res1_score = float(resistances[0].strength_score) if resistances else 45.0
+        res1_htf = bool(getattr(resistances[0], "htf_confirmed", False)) if resistances else False
+
         entry_price = live_close
         entry_zone_low = live_close
         entry_zone_high = live_close
@@ -1606,25 +2312,36 @@ class SignalEngine:
         tp3_price = 0.0
         entry_type_tr = "Bekle-Gör (İşlem Açılmaz)"
         sr_context_tr = (
-            f"Fiyat ({format(live_close, p_fmt)}) şu an {format(sup_safe, p_fmt)} desteği ile "
-            f"{format(res_safe, p_fmt)} direnci arasında kararsız bölgede."
+            f"Fiyat ({format(live_close, p_fmt)}) şu an {sup1_tier} ({format(sup_safe, p_fmt)}) ile "
+            f"{res1_tier} ({format(res_safe, p_fmt)}) arasında kararsız bölgede."
         )
 
         if cand_dir == "LONG":
-            # Check if price is jammed right under resistance ceiling without breakout momentum
-            if dist_to_res_pct < 0.42 * atr_pct and composite < 38.0 and "BULL_BOS" not in last_ev_type:
+            # Check if price is jammed right under resistance ceiling without breakout momentum or short squeeze fuel
+            res_block_thresh = (0.52 * atr_pct) if res1_strong else (0.35 * atr_pct)
+            if (
+                dist_to_res_pct < res_block_thresh
+                and composite < 38.0
+                and "BULL_BOS" not in last_ev_type
+                and tl_status != "BULL_BREAKOUT"
+                and not is_short_squeeze
+            ):
                 veto_reasons.append(
-                    f"Fiyat {format(res_safe, p_fmt)} direnç tavanına çok yakın (mesafe sadece %{dist_to_res_pct:.2f}); direnç altında Long açmak tavan reddi riski taşır."
+                    f"Fiyat {res1_tier} ({format(res_safe, p_fmt)} — Güç: {res1_score:.0f}/100) tavanına çok yakın (mesafe sadece %{dist_to_res_pct:.2f}); direnç altında Long açmak tavan reddi riski taşır."
                 )
 
-            # Decide Market/Near Entry vs Pullback Limit Entry
-            if dist_to_sup_pct <= 1.35 * atr_pct or "BULL_BOS" in last_ev_type or "BULL_SWEEP" in last_ev_type:
-                entry_type_tr = "⚡ Piyasa / Yakın Bölge Girişi (Destek & Yapı Onaylı)"
+            if (
+                dist_to_sup_pct <= 1.35 * atr_pct
+                or "BULL_BOS" in last_ev_type
+                or "BULL_SWEEP" in last_ev_type
+                or sr_action_type in ("BULL_SFP", "BULL_RETEST")
+                or tl_status == "BULL_BREAKOUT"
+            ):
+                entry_type_tr = "⚡ Piyasa / Yakın Bölge Girişi (Destek / Retest / Kırılım Onaylı)"
                 entry_price = live_close
                 entry_zone_low = max(sup_safe, live_close - 0.25 * atr_safe)
                 entry_zone_high = live_close * 1.0015
             else:
-                # Price is somewhat extended above support -> recommend slight pullback entry toward EMA20/Kalman/Support
                 pullback_anchor = max(sup_safe + 0.20 * atr_safe, min(ema20, kalman_price, live_close - 0.35 * atr_safe))
                 entry_type_tr = "🎯 Kademeli Limit / Geri Çekilme Girişi (Destek & Ortalamaya Yakın)"
                 entry_price = float(np.clip(pullback_anchor, sup_safe, live_close))
@@ -1638,9 +2355,12 @@ class SignalEngine:
             stop_price = float(np.clip(raw_stop, max_stop, min_stop))
             stop_dist = max(entry_price - stop_price, entry_price * 0.004)
 
-            # TP1, TP2, TP3 respecting Resistance & Short Liquidation Pool
+            # TP1, TP2, TP3 respecting Resistance, 4H/1D MTF Wall & Short Liquidation Pool
             tp1_cand = res_safe if (res_safe >= entry_price + 0.95 * stop_dist) else (entry_price + 1.15 * stop_dist)
-            tp1_price = min(tp1_cand, entry_price + 1.45 * stop_dist)
+            if res1_htf and res1_strong and res_safe > entry_price * 1.004:
+                # Module 1: Front-run the 4H/1D macro wall slightly so TP1 fills safely before the wall
+                tp1_cand = min(tp1_cand, res_safe * 0.9985)
+            tp1_price = max(min(tp1_cand, entry_price + 1.45 * stop_dist), entry_price * 1.003)
             tp2_cand = max(res_safe, poc_price if poc_price > entry_price else 0.0, vah_price if vah_price > entry_price else 0.0)
             if tp2_cand < entry_price + 1.45 * stop_dist:
                 tp2_cand = max(res2_safe, entry_price + 1.85 * stop_dist)
@@ -1649,20 +2369,35 @@ class SignalEngine:
             tp3_price = max(tp3_cand, tp2_price + 0.75 * atr_safe)
 
             sr_context_tr = (
-                f"🟢 <b>{format(sup_safe, p_fmt)}</b> ana desteği baz alınarak Stop seviyesi iğne/tuzak avının "
-                f"altına (<b>{format(stop_price, p_fmt)}</b>) korundu; yukarıda <b>{format(res_safe, p_fmt)}</b> direnci "
+                f"{sup1_tier} (<b>{format(sup_safe, p_fmt)}</b> — Güç: {sup1_score:.0f}/100) baz alınarak Stop seviyesi iğne avının "
+                f"altına (<b>{format(stop_price, p_fmt)}</b>) korundu; yukarıda {res1_tier} (<b>{format(res_safe, p_fmt)}</b>) "
                 f"ve <b>{format(tp2_price, p_fmt)}</b> hedefi gözetildi."
             )
+            if sup1_strong:
+                htf_note = " [🏛️ 4H/1D Üst Periyot Onaylı]" if sup1_htf else ""
+                positives.append(f"Altımızda {sup1_tier} ({format(sup_safe, p_fmt)} — Güç: {sup1_score:.0f}/100){htf_note} sağlam taban koruması sağlıyor.")
 
         elif cand_dir == "SHORT":
-            # Check if price is jammed right on top of major support floor without breakdown momentum
-            if dist_to_sup_pct < 0.42 * atr_pct and composite > -38.0 and "BEAR_BOS" not in last_ev_type:
+            sup_block_thresh = (0.52 * atr_pct) if sup1_strong else (0.35 * atr_pct)
+            if (
+                dist_to_sup_pct < sup_block_thresh
+                and composite > -38.0
+                and "BEAR_BOS" not in last_ev_type
+                and tl_status != "BEAR_BREAKDOWN"
+                and not is_long_squeeze
+            ):
                 veto_reasons.append(
-                    f"Fiyat {format(sup_safe, p_fmt)} destek tabanına çok yakın (mesafe sadece %{dist_to_sup_pct:.2f}); destek üstünde Short açmak sert tepki riski taşır."
+                    f"Fiyat {sup1_tier} ({format(sup_safe, p_fmt)} — Güç: {sup1_score:.0f}/100) tabanına çok yakın (mesafe sadece %{dist_to_sup_pct:.2f}); destek üstünde Short açmak sert tepki riski taşır."
                 )
 
-            if dist_to_res_pct <= 1.35 * atr_pct or "BEAR_BOS" in last_ev_type or "BEAR_SWEEP" in last_ev_type:
-                entry_type_tr = "⚡ Piyasa / Yakın Bölge Girişi (Direnç & Yapı Onaylı)"
+            if (
+                dist_to_res_pct <= 1.35 * atr_pct
+                or "BEAR_BOS" in last_ev_type
+                or "BEAR_SWEEP" in last_ev_type
+                or sr_action_type in ("BEAR_SFP", "BEAR_RETEST")
+                or tl_status == "BEAR_BREAKDOWN"
+            ):
+                entry_type_tr = "⚡ Piyasa / Yakın Bölge Girişi (Direnç / Retest / Kırılım Onaylı)"
                 entry_price = live_close
                 entry_zone_low = live_close * 0.9985
                 entry_zone_high = min(res_safe, live_close + 0.25 * atr_safe)
@@ -1680,9 +2415,10 @@ class SignalEngine:
             stop_price = float(np.clip(raw_stop, min_stop, max_stop))
             stop_dist = max(stop_price - entry_price, entry_price * 0.004)
 
-            # TP1, TP2, TP3 respecting Support & Long Liquidation Pool
             tp1_cand = sup_safe if (sup_safe <= entry_price - 0.95 * stop_dist) else (entry_price - 1.15 * stop_dist)
-            tp1_price = max(tp1_cand, entry_price - 1.45 * stop_dist)
+            if sup1_htf and sup1_strong and sup_safe < entry_price * 0.996:
+                tp1_cand = max(tp1_cand, sup_safe * 1.0015)
+            tp1_price = min(max(tp1_cand, entry_price - 1.45 * stop_dist), entry_price * 0.997)
             tp2_cand_list = [sup_safe]
             if 0 < poc_price < entry_price:
                 tp2_cand_list.append(poc_price)
@@ -1696,10 +2432,13 @@ class SignalEngine:
             tp3_price = max(min(tp3_cand, tp2_price - 0.75 * atr_safe), entry_price * 0.4)
 
             sr_context_tr = (
-                f"🔴 <b>{format(res_safe, p_fmt)}</b> ana direnci baz alınarak Stop seviyesi iğne/tuzak avının "
-                f"üstüne (<b>{format(stop_price, p_fmt)}</b>) korundu; aşağıda <b>{format(sup_safe, p_fmt)}</b> desteği "
+                f"{res1_tier} (<b>{format(res_safe, p_fmt)}</b> — Güç: {res1_score:.0f}/100) baz alınarak Stop seviyesi iğne avının "
+                f"üstüne (<b>{format(stop_price, p_fmt)}</b>) korundu; aşağıda {sup1_tier} (<b>{format(sup_safe, p_fmt)}</b>) "
                 f"ve <b>{format(tp2_price, p_fmt)}</b> hedefi gözetildi."
             )
+            if res1_strong:
+                htf_note = " [🏛️ 4H/1D Üst Periyot Onaylı]" if res1_htf else ""
+                positives.append(f"Üstümüzde {res1_tier} ({format(res_safe, p_fmt)} — Güç: {res1_score:.0f}/100){htf_note} güçlü satış tavanı oluşturuyor.")
 
         stop_distance_pct = abs(entry_price - stop_price) / max(entry_price, 1e-9) * 100.0 if stop_price > 0 else 0.0
         tp1_distance_pct = abs(tp1_price - entry_price) / max(entry_price, 1e-9) * 100.0 if tp1_price > 0 else 0.0
@@ -1788,8 +2527,14 @@ class SignalEngine:
                 else:
                     conf_pts += 2.0
 
-                # Crowd Squeeze Warning on Extreme Funding
-                if is_long and fr_pct > 0.035:
+                # Crowd Squeeze Warning / Fuel on Funding
+                if is_long and is_short_squeeze:
+                    conf_pts += 4.5
+                    positives.append(leverage_squeeze_status_tr)
+                elif is_short and is_long_squeeze:
+                    conf_pts += 4.5
+                    positives.append(leverage_squeeze_status_tr)
+                elif is_long and fr_pct > 0.035:
                     warnings.append(f"Fonlama oranı yüksek (+%{fr_pct:.4f}); aşırı kalabalık Long kaynaklı iğne riski var.")
                 elif is_short and fr_pct < -0.025:
                     warnings.append(f"Fonlama oranı negatif (%{fr_pct:.4f}); Short Squeeze (yukarı patlatma) riskine dikkat.")
@@ -1799,9 +2544,16 @@ class SignalEngine:
             else:
                 conf_pts += 7.5
 
-        # Pillar E: Smart Money Structure (BOS / CHoCH / Sweep / OB) (0 - 12 pts)
+        # Pillar E: Smart Money Structure (BOS / CHoCH / Sweep / OB / Retest / SFP / Trendline Breakout) (0 - 14 pts)
         if cand_dir in ("LONG", "SHORT"):
-            if (is_long and ("BULL_BOS" in last_ev_type or "BULL_CHOCH" in last_ev_type or "BULL_SWEEP" in last_ev_type)) or (
+            if (is_long and sr_action_type in ("BULL_SFP", "BULL_RETEST")) or (is_short and sr_action_type in ("BEAR_SFP", "BEAR_RETEST")):
+                conf_pts += 13.0
+                positives.append(sr_action_status_tr)
+            elif (is_long and tl_status == "BULL_BREAKOUT") or (is_short and tl_status == "BEAR_BREAKDOWN"):
+                conf_pts += 12.5
+                if trendlines is not None:
+                    positives.append(trendlines.summary_tr)
+            elif (is_long and ("BULL_BOS" in last_ev_type or "BULL_CHOCH" in last_ev_type or "BULL_SWEEP" in last_ev_type)) or (
                 is_short and ("BEAR_BOS" in last_ev_type or "BEAR_CHOCH" in last_ev_type or "BEAR_SWEEP" in last_ev_type)
             ):
                 conf_pts += 12.0
@@ -1893,6 +2645,7 @@ class SignalEngine:
                     f"Destek (Taban): {format(sup_safe, p_fmt)} USDT | Direnç (Tavan): {format(res_safe, p_fmt)} USDT"
                 ),
                 futures_tech_summary_tr=futures_tech_summary_tr,
+                leverage_squeeze_status_tr=leverage_squeeze_status_tr,
                 positive_factors_tr=positives,
                 risk_warnings_tr=all_warnings if all_warnings else ["Teknik yapı vadeli işlem kriterlerini karşılamıyor."],
                 wait_condition_tr=wait_condition_tr,
@@ -1926,6 +2679,7 @@ class SignalEngine:
             max_safe_leverage=max_safe_leverage,
             sr_context_tr=sr_context_tr,
             futures_tech_summary_tr=futures_tech_summary_tr,
+            leverage_squeeze_status_tr=leverage_squeeze_status_tr,
             positive_factors_tr=positives,
             risk_warnings_tr=warnings,
             wait_condition_tr=wait_condition_tr,

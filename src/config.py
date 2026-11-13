@@ -11,7 +11,7 @@ class ExchangeConfig:
     """Settings for CCXT exchange data retrieval (Spot + Futures + OrderBook)."""
     primary_exchange: str = "binance"
     fallback_exchanges: List[str] = field(
-        default_factory=lambda: ["gate", "kucoin", "kraken", "coinbase", "cryptocom", "okx", "bybit"]
+        default_factory=lambda: ["binance", "bybit", "okx", "kucoin", "gate", "kraken", "coinbase"]
     )
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"

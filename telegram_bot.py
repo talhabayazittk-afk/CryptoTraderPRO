@@ -656,8 +656,9 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             cq_id,
             f"🔄 {sym} ({tf}) canlı verilerle yenileniyor..." if is_ref else f"⏳ {sym} ({tf}) analiz açılıyor...",
         )
+        ex_c = str(load_telegram_state().get("primary_exchange", "binance")).lower()
         with _CACHE_LOCK:
-            cached_b = _BUNDLE_CACHE.get(sym.upper())
+            cached_b = _BUNDLE_CACHE.get(f"{ex_c}:{sym.upper()}")
             is_cold = is_ref or (cached_b is None) or ((time.time() - cached_b[0]) > CACHE_TTL_SEC)
         if is_cold and not is_photo_msg and msg_id:
             edit_telegram_message(
@@ -880,8 +881,9 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             cq_id,
             f"⚡ {sym} ({tf}) Vadeli İşlem (Long/Short) & Güven Radarı hesaplanıyor...",
         )
+        ex_c = str(load_telegram_state().get("primary_exchange", "binance")).lower()
         with _CACHE_LOCK:
-            cached_b = _BUNDLE_CACHE.get(sym.upper())
+            cached_b = _BUNDLE_CACHE.get(f"{ex_c}:{sym.upper()}")
             is_cold = is_ref or (cached_b is None) or ((time.time() - cached_b[0]) > CACHE_TTL_SEC)
         if is_cold and not is_photo_msg and msg_id:
             edit_telegram_message(
@@ -1216,12 +1218,13 @@ def _safe_callback_worker(bot_token: str, cq: Dict[str, Any], cq_chat_id: str) -
     try:
         _handle_callback_query(bot_token, cq)
     except Exception as cq_err:
-        _log(f"Callback hatası ({cq.get('data')}): {cq_err}")
+        import traceback
+        _log(f"Callback hatası ({cq.get('data')}): {cq_err}\n{traceback.format_exc()}")
         if cq_chat_id:
             send_telegram_message(
                 bot_token,
                 cq_chat_id,
-                "⚠️ İstek işlenirken geçici bir borsa/veri hatası oluştu. Lütfen tekrar dokunun.",
+                f"⚠️ İstek işlenirken geçici bir borsa/veri hatası oluştu ({cq_err}). Lütfen tekrar dokunun.",
             )
 
 

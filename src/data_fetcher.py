@@ -260,17 +260,21 @@ class CryptoDataFetcher:
 
         last_error: Optional[Exception] = None
 
+        direct_rest_exchanges = {"binance", "okx", "bybit", "kucoin", "gate"}
+
         for ex_id in exchanges_to_try:
             try:
+                ex_low = ex_id.lower()
                 # 1. Ultra-fast Direct REST API path (no CCXT load_markets overhead)
-                try:
-                    direct_df = self._fetch_direct_ohlcv(ex_id, target_symbol, target_tf, target_limit)
+                if ex_low in direct_rest_exchanges:
+                    direct_df = self._fetch_direct_ohlcv(ex_low, target_symbol, target_tf, target_limit)
                     if direct_df is not None and len(direct_df) > 0:
-                        return direct_df, ex_id.upper()
-                except Exception as dir_exc:
-                    logger.debug(f"[{ex_id.upper()}] Direct REST kline fallback: {dir_exc}")
+                        return direct_df, ex_low.upper()
+                    # Coin is not listed on this exchange (e.g. CYBER/USDT on OKX) -> immediately try next exchange
+                    # without wasting 10-15s on CCXT load_markets() for the same unlisted symbol.
+                    raise RuntimeError(f"{ex_low.upper()} üzerinde {target_symbol} listeli değil veya boş döndü.")
 
-                # 2. CCXT Fallback path (e.g. Kraken, Coinbase)
+                # 2. CCXT Fallback path (only for non-direct exchanges like Kraken, Coinbase)
                 exchange = self._get_spot_exchange(ex_id)
                 candidate_symbols = [target_symbol]
                 if target_symbol.endswith("/USDT"):
@@ -297,7 +301,7 @@ class CryptoDataFetcher:
 
             except Exception as exc:
                 last_error = exc
-                logger.warning(f"[{ex_id.upper()}] Veri çekme hatası: {exc}. Alternatif deneniyor...")
+                logger.debug(f"[{ex_id.upper()}] {target_symbol} alternatif borsaya geçiliyor: {exc}")
 
         if allow_synthetic_fallback:
             logger.warning("Canlı borsa bağlantısı kurulamadı. Gerçekçi simülasyon verisi üretiliyor...")
@@ -361,8 +365,9 @@ class CryptoDataFetcher:
 
         intel = OrderFlowIntel(symbol=target_symbol, exchange=ex_id.upper())
 
-        # 1. Deep Spot Order Book & 24h Ticker (Direct HTTP REST for binance, okx, bybit, kucoin, gate)
-        spot_exchanges_to_try = [ex_id] + [fb for fb in ("binance", "okx", "gate", "kucoin", "bybit", "kraken", "coinbase") if fb != ex_id]
+        # 1. Deep Spot Order Book & 24h Ticker (Direct HTTP REST for binance, bybit, okx, kucoin, gate)
+        spot_exchanges_to_try = [ex_id] + [fb for fb in ("binance", "bybit", "okx", "kucoin", "gate", "kraken", "coinbase") if fb != ex_id]
+        okx_spot_missing = False
         for s_ex in spot_exchanges_to_try:
             try:
                 bids: list = []
@@ -379,22 +384,27 @@ class CryptoDataFetcher:
                         intel.quote_volume_24h_usd = float(t24.get("quoteVolume") or 0.0)
 
                 elif s_ex == "okx":
-                    ob_res = _http_get_json("https://www.okx.com/api/v5/market/books", {"instId": f"{base_ccy}-{quote_ccy}", "sz": 100}, timeout=4.0)
+                    try:
+                        ob_res = _http_get_json("https://www.okx.com/api/v5/market/books", {"instId": f"{base_ccy}-{quote_ccy}", "sz": 100}, timeout=3.5)
+                    except Exception:
+                        ob_res = {}
                     ob_data = ob_res.get("data", []) if isinstance(ob_res, dict) else []
                     if ob_data:
                         bids = [[r[0], r[1]] for r in ob_data[0].get("bids", [])]
                         asks = [[r[0], r[1]] for r in ob_data[0].get("asks", [])]
-                    tk_res = _http_get_json("https://www.okx.com/api/v5/market/ticker", {"instId": f"{base_ccy}-{quote_ccy}"}, timeout=4.0)
-                    tk_data = tk_res.get("data", []) if isinstance(tk_res, dict) else []
-                    if tk_data:
-                        tk = tk_data[0]
-                        last_p = float(tk.get("last") or 0.0)
-                        open_24 = float(tk.get("open24h") or 0.0)
-                        if open_24 > 0:
-                            intel.price_change_24h_pct = ((last_p - open_24) / open_24) * 100.0
-                        intel.high_24h = float(tk.get("high24h") or 0.0)
-                        intel.low_24h = float(tk.get("low24h") or 0.0)
-                        intel.quote_volume_24h_usd = float(tk.get("volCcy24h") or 0.0)
+                        tk_res = _http_get_json("https://www.okx.com/api/v5/market/ticker", {"instId": f"{base_ccy}-{quote_ccy}"}, timeout=3.5)
+                        tk_data = tk_res.get("data", []) if isinstance(tk_res, dict) else []
+                        if tk_data:
+                            tk = tk_data[0]
+                            last_p = float(tk.get("last") or 0.0)
+                            open_24 = float(tk.get("open24h") or 0.0)
+                            if open_24 > 0:
+                                intel.price_change_24h_pct = ((last_p - open_24) / open_24) * 100.0
+                            intel.high_24h = float(tk.get("high24h") or 0.0)
+                            intel.low_24h = float(tk.get("low24h") or 0.0)
+                            intel.quote_volume_24h_usd = float(tk.get("volCcy24h") or 0.0)
+                    else:
+                        okx_spot_missing = True
 
                 elif s_ex == "bybit":
                     for dom in ("https://api.bytick.com", "https://api.bybit.com"):
@@ -521,8 +531,8 @@ class CryptoDataFetcher:
         # 2. Perpetual Futures Intelligence (Direct HTTP REST without CCXT load_markets overhead)
         try:
             mark_p_ref = 0.0
-            # 2a. Try Bybit Linear Ticker if selected
-            if ex_id == "bybit":
+            # 2a. Try Bybit Linear Ticker if selected or if primary exchange doesn't list this contract
+            if ex_id in ("bybit", "binance", "kucoin") or intel.funding_rate_pct is None:
                 for dom in ("https://api.bytick.com", "https://api.bybit.com"):
                     try:
                         lin_res = _http_get_json(f"{dom}/v5/market/tickers", {"category": "linear", "symbol": raw_sym}, timeout=3.0)
@@ -557,50 +567,51 @@ class CryptoDataFetcher:
                 except Exception:
                     pass
 
-            # 2c. Direct OKX Swap Rubik Stats (works globally & in US on streamlit.app, gives Funding, OI 1h/4h/24h delta, L/S ratio, Taker Vol)
-            try:
-                inst_id = f"{base_ccy}-USDT-SWAP"
-                if intel.funding_rate_pct is None or ex_id == "okx":
-                    fr_res = _http_get_json("https://www.okx.com/api/v5/public/funding-rate", {"instId": inst_id}, timeout=3.5)
-                    fr_list = fr_res.get("data", []) if isinstance(fr_res, dict) else []
-                    if fr_list and fr_list[0].get("fundingRate") is not None:
-                        intel.funding_rate_pct = float(fr_list[0]["fundingRate"]) * 100.0
+            # 2c. Direct OKX Swap Rubik Stats (skip if OKX Spot explicitly reported this coin as unlisted)
+            if not okx_spot_missing:
+                try:
+                    inst_id = f"{base_ccy}-USDT-SWAP"
+                    if intel.funding_rate_pct is None or ex_id == "okx":
+                        fr_res = _http_get_json("https://www.okx.com/api/v5/public/funding-rate", {"instId": inst_id}, timeout=3.0)
+                        fr_list = fr_res.get("data", []) if isinstance(fr_res, dict) else []
+                        if fr_list and fr_list[0].get("fundingRate") is not None:
+                            intel.funding_rate_pct = float(fr_list[0]["fundingRate"]) * 100.0
 
-                if intel.oi_change_24h_pct is None:
-                    oih_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume", {"ccy": base_ccy, "period": "1H"}, timeout=3.5)
-                    oih_list = oih_res.get("data", []) if isinstance(oih_res, dict) else []
-                    if oih_list and len(oih_list) >= 2:
-                        oi_now = float(oih_list[0][1])
-                        oi_1h = float(oih_list[1][1])
-                        oi_4h = float(oih_list[min(4, len(oih_list) - 1)][1])
-                        oi_24h = float(oih_list[min(24, len(oih_list) - 1)][1])
-                        if oi_now > 0:
-                            intel.open_interest_usd = oi_now
-                        if oi_1h > 0:
-                            intel.oi_change_1h_pct = ((oi_now - oi_1h) / oi_1h) * 100.0
-                        if oi_4h > 0:
-                            intel.oi_change_4h_pct = ((oi_now - oi_4h) / oi_4h) * 100.0
-                        if oi_24h > 0:
-                            intel.oi_change_24h_pct = ((oi_now - oi_24h) / oi_24h) * 100.0
+                    if intel.oi_change_24h_pct is None:
+                        oih_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume", {"ccy": base_ccy, "period": "1H"}, timeout=3.0)
+                        oih_list = oih_res.get("data", []) if isinstance(oih_res, dict) else []
+                        if oih_list and len(oih_list) >= 2:
+                            oi_now = float(oih_list[0][1])
+                            oi_1h = float(oih_list[1][1])
+                            oi_4h = float(oih_list[min(4, len(oih_list) - 1)][1])
+                            oi_24h = float(oih_list[min(24, len(oih_list) - 1)][1])
+                            if oi_now > 0:
+                                intel.open_interest_usd = oi_now
+                            if oi_1h > 0:
+                                intel.oi_change_1h_pct = ((oi_now - oi_1h) / oi_1h) * 100.0
+                            if oi_4h > 0:
+                                intel.oi_change_4h_pct = ((oi_now - oi_4h) / oi_4h) * 100.0
+                            if oi_24h > 0:
+                                intel.oi_change_24h_pct = ((oi_now - oi_24h) / oi_24h) * 100.0
 
-                if intel.long_short_ratio is None:
-                    ls_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio", {"ccy": base_ccy, "period": "1H"}, timeout=3.5)
-                    ls_list = ls_res.get("data", []) if isinstance(ls_res, dict) else []
-                    if ls_list and len(ls_list) >= 1:
-                        intel.long_short_ratio = float(ls_list[0][1])
+                    if intel.long_short_ratio is None:
+                        ls_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio", {"ccy": base_ccy, "period": "1H"}, timeout=3.0)
+                        ls_list = ls_res.get("data", []) if isinstance(ls_res, dict) else []
+                        if ls_list and len(ls_list) >= 1:
+                            intel.long_short_ratio = float(ls_list[0][1])
 
-                if intel.futures_taker_buy_sell_ratio is None:
-                    tv_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/taker-volume", {"ccy": base_ccy, "instType": "CONTRACTS", "period": "1H"}, timeout=3.5)
-                    tv_list = tv_res.get("data", []) if isinstance(tv_res, dict) else []
-                    if tv_list and len(tv_list) >= 1:
-                        sell_v = float(tv_list[0][1] or 0.0)
-                        buy_v = float(tv_list[0][2] or 0.0)
-                        if sell_v > 0:
-                            intel.futures_taker_buy_sell_ratio = buy_v / sell_v
-                        ref_p = float(mark_p_ref or intel.high_24h or 1.0)
-                        intel.perp_cvd_delta_24h_usd = (buy_v - sell_v) * ref_p
-            except Exception:
-                pass
+                    if intel.futures_taker_buy_sell_ratio is None:
+                        tv_res = _http_get_json("https://www.okx.com/api/v5/rubik/stat/taker-volume", {"ccy": base_ccy, "instType": "CONTRACTS", "period": "1H"}, timeout=3.0)
+                        tv_list = tv_res.get("data", []) if isinstance(tv_res, dict) else []
+                        if tv_list and len(tv_list) >= 1:
+                            sell_v = float(tv_list[0][1] or 0.0)
+                            buy_v = float(tv_list[0][2] or 0.0)
+                            if sell_v > 0:
+                                intel.futures_taker_buy_sell_ratio = buy_v / sell_v
+                            ref_p = float(mark_p_ref or intel.high_24h or 1.0)
+                            intel.perp_cvd_delta_24h_usd = (buy_v - sell_v) * ref_p
+                except Exception:
+                    pass
 
             # Classify 4-Quadrant Open Interest (OI) x Price Regime
             if intel.oi_change_24h_pct is not None:

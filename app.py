@@ -57,11 +57,13 @@ from src.patterns import CandlestickPatternDetector, PATTERN_INFO_TR
 from src.signals import MarketForecast, SignalEngine
 from src.telegram_notifier import (
     build_analysis_inline_keyboard,
+    build_breakout_radar_inline_keyboard,
     build_coin_list_inline_keyboard,
     build_futures_radar_inline_keyboard,
     build_futures_setup_inline_keyboard,
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
+    format_breakout_radar_scan_telegram_html,
     format_forecast_telegram_html,
     format_futures_radar_scan_telegram_html,
     format_futures_setup_telegram_html,
@@ -278,7 +280,7 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v9.2",
+    _engine_version: str = "v9.4",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
     Parallel cached pipeline (v3.0):
@@ -696,7 +698,7 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
         )
         st.dataframe(display_screener_df, use_container_width=True, hide_index=True)
 
-        sc_btn1, sc_btn2, sc_btn3 = st.columns([1, 1, 1])
+        sc_btn1, sc_btn2, sc_btn3, sc_btn4 = st.columns([1, 1, 1, 1])
         with sc_btn1:
             csv_bytes = display_screener_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
@@ -721,6 +723,28 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
                 else:
                     st.warning(status_tg)
         with sc_btn3:
+            if st.button("🚨 Kırılım Radarını Telegram'a Gönder", use_container_width=True):
+                brk_entries = [
+                    {
+                        "symbol": r["Coin"],
+                        "price": r["_raw_price"],
+                        "fc": r["_fc_1h"],
+                    }
+                    for r in screener_rows
+                ]
+                msg_brk_radar = format_breakout_radar_scan_telegram_html(brk_entries, "1H")
+                kb_brk_radar = build_breakout_radar_inline_keyboard(brk_entries, "1H")
+                ok_br, status_br = send_telegram_message(
+                    tg_token_input,
+                    tg_chat_input,
+                    msg_brk_radar,
+                    reply_markup=kb_brk_radar,
+                )
+                if ok_br:
+                    st.success(status_br)
+                else:
+                    st.warning(status_br)
+        with sc_btn4:
             if st.button("⚡ Vadeli İşlem Radarını Telegram'a Gönder", use_container_width=True):
                 radar_entries = [
                     {
@@ -966,11 +990,20 @@ with c1:
     tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
     sr_act_type = getattr(fc_active, "sr_action_type", "NONE")
     sr_act_str = getattr(fc_active, "sr_action_status_tr", "")
-    if sr_act_type != "NONE" and sr_act_str:
+    sr_guide_str = getattr(fc_active, "sr_breakout_guide_tr", "")
+    if sr_act_type in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") and sr_act_str:
+        brk_color = "#10B981" if sr_act_type == "BULL_SR_BREAKOUT" else "#EF4444"
+        breakout_line_html = f"• <b>Kırılım Durumu:</b> <b style='color:{brk_color};'>{sr_act_str}</b>"
+    elif sr_act_type != "NONE" and sr_act_str:
         breakout_line_html = f"• <b>Seviye Onayı / Tuzak:</b> <b style='color:#38BDF8;'>{sr_act_str}</b>"
     else:
         breakout_line_html = f"• <b>Kırılım İzi:</b> {breakout_text}"
     tl_line_html = f"• <b>Dinamik Kanal:</b> {tl_summary}<br>" if tl_summary else ""
+    guide_line_html = (
+        f"• <b>📐 Kırılım Nasıl Olur?:</b> <span style='color:#E2E8F0;'>{sr_guide_str}</span>"
+        if sr_guide_str
+        else f"• <b>Yukarı / Aşağı Eşik:</b> <b style='color:#00E676;'>{price_fmt(up_break_price)}</b> üstü / <b style='color:#FF5252;'>{price_fmt(down_break_price)}</b> altı"
+    )
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid {score_col};">
@@ -979,7 +1012,7 @@ with c1:
             <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
                 {breakout_line_html}<br>
                 {tl_line_html}• <b>Sıkışma Durumu:</b> {squeeze_short}<br>
-                • <b>Yukarı / Aşağı Eşik:</b> <b style="color:#00E676;">{price_fmt(up_break_price)}</b> üstü / <b style="color:#FF5252;">{price_fmt(down_break_price)}</b> altı
+                {guide_line_html}
             </div>
         </div>
         """,

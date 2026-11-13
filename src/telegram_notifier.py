@@ -273,13 +273,13 @@ def build_main_reply_keyboard() -> Dict[str, Any]:
         "keyboard": [
             [
                 {"text": "🪙 Coin Seç & Analiz"},
+                {"text": "🚨 Kırılım Radarı"},
                 {"text": "⚡ Vadeli İşlem Radarı"},
-                {"text": "🚀 Tümünü Tara (1H)"},
             ],
             [
+                {"text": "🚀 Tümünü Tara (1H)"},
                 {"text": "🌍 Piyasa & Nakit Özeti"},
                 {"text": "⏰ Alarmlarım & Radar"},
-                {"text": "📋 Komutlar & Yardım"},
             ],
         ],
         "resize_keyboard": True,
@@ -291,7 +291,7 @@ def build_analysis_inline_keyboard(symbol: str, active_tf: str) -> Dict[str, Any
     """
     Builds a rich touch button deck underneath every single-coin analysis message:
       Row 1: [15M] [1H] [4H] [1D] instant timeframe switcher
-      Row 2: [⚡ Vadeli İşlem Kurulumu] [📡 Vadeli Radar]
+      Row 2: [⚡ Vadeli İşlem Kurulumu] [🚨 Kırılım Radarı]
       Row 3: [🖼️ Grafik] [🧲 Mıknatıs & Likidasyon] [🧮 Kasa Planı]
       Row 4: [🔔 Direnç Alarmı Kur] [🔔 Destek Alarmı Kur]
       Row 5: [🔄 Yenile] [🪙 Coin Seç] [🚀 Tarama]
@@ -307,7 +307,7 @@ def build_analysis_inline_keyboard(symbol: str, active_tf: str) -> Dict[str, Any
             tf_row,
             [
                 {"text": "⚡ Vadeli İşlem (Long/Short) Planı", "callback_data": f"fut:{symbol}:{tf_up}"},
-                {"text": "📡 Vadeli Radar", "callback_data": f"fut_scan:{tf_up}"},
+                {"text": "🚨 Kırılım Radarı", "callback_data": f"brk_scan:{tf_up}"},
             ],
             [
                 {"text": "🖼️ Grafik Gönder", "callback_data": f"chart:{symbol}:{tf_up}"},
@@ -762,18 +762,20 @@ def format_forecast_telegram_html(
     tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
     sr_act_type = getattr(fc, "sr_action_type", "NONE")
     sr_act_str = getattr(fc, "sr_action_status_tr", "")
-    breakout_tg_line = f"• <b>Seviye Onayı / Tuzak:</b> <b>{sr_act_str}</b>" if (sr_act_type != "NONE" and sr_act_str) else f"• <b>Kırılım İzi:</b> {breakout_text}"
+    sr_guide_str = getattr(fc, "sr_breakout_guide_tr", "")
+    breakout_tg_line = f"• <b>Kırılım / Seviye Durumu:</b> <b>{sr_act_str}</b>" if (sr_act_type != "NONE" and sr_act_str) else f"• <b>Kırılım İzi:</b> {breakout_text}"
     tl_tg_line = f"\n• <b>Dinamik Kanal:</b> {tl_summary}" if tl_summary else ""
+    guide_tg_line = f"\n• 📐 <b>Kırılım Nasıl Olur?:</b> <i>{sr_guide_str}</i>" if sr_guide_str else ""
 
     lines.extend(
         [
             "",
             f"1️⃣ <b>MEVCUT TREND &amp; KIRILIMLAR ({tf_up})</b>",
             f"• <b>Mevcut Trend:</b> {trend_title}",
-            breakout_tg_line + tl_tg_line,
+            breakout_tg_line + tl_tg_line + guide_tg_line,
             f"• <b>Sıkışma Durumu:</b> {squeeze_short}",
-            f"• <b>Yukarı Kırılım Eşiği:</b> <code>{_p(up_break_price)}</code> üstü",
-            f"• <b>Aşağı Kırılım Eşiği:</b> <code>{_p(down_break_price)}</code> altı",
+            f"• <b>Yukarı Kırılım Eşiği:</b> <code>{_p(up_break_price)}</code> üstü (Mum Kapanışı + Hacim)",
+            f"• <b>Aşağı Kırılım Eşiği:</b> <code>{_p(down_break_price)}</code> altı (Mum Kapanışı)",
             "",
             "2️⃣ <b>DESTEK &amp; DİRENÇ MİMARİSİ</b>",
             f"• 💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code>",
@@ -1166,6 +1168,143 @@ def format_position_size_telegram_html(
     return "\n".join(lines)
 
 
+def build_breakout_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: str = "1H") -> Dict[str, Any]:
+    """
+    Builds interactive touch buttons underneath the Support/Resistance Breakout & SFP Radar screen:
+      - Direct buttons for coins to open their full 4-card analysis or chart
+      - Timeframe switcher [15M | 1H | 4H | 1D] for the Breakout Radar
+    """
+    tf_up = timeframe.upper()
+    kb_rows: List[List[Dict[str, str]]] = []
+
+    coin_btns: List[Dict[str, str]] = []
+    for r in rows[:8]:
+        sym = str(r.get("symbol", r.get("Coin", "")))
+        if not sym:
+            continue
+        short_sym = sym.split("/")[0]
+        fc_obj = r.get("fc")
+        act_t = getattr(fc_obj, "sr_action_type", "NONE") if fc_obj else "NONE"
+        tl_st = getattr(getattr(fc_obj, "trendlines", None), "breakout_status", "NONE") if fc_obj else "NONE"
+        if act_t == "BULL_SR_BREAKOUT" or tl_st == "BULL_BREAKOUT":
+            ic = "🚀"
+        elif act_t == "BEAR_SR_BREAKDOWN" or tl_st == "BEAR_BREAKDOWN":
+            ic = "🩸"
+        elif "SFP" in act_t:
+            ic = "🪤"
+        elif "RETEST" in act_t:
+            ic = "🔄"
+        else:
+            ic = "⏳"
+        coin_btns.append({"text": f"{ic} {short_sym}", "callback_data": f"an:{sym}:{tf_up}"})
+        if len(coin_btns) == 4:
+            kb_rows.append(coin_btns)
+            coin_btns = []
+    if coin_btns:
+        kb_rows.append(coin_btns)
+
+    tf_row = []
+    for tf_opt in ("15M", "1H", "4H", "1D"):
+        lbl = f"✅ {tf_opt}" if tf_opt == tf_up else f"🚨 {tf_opt}"
+        tf_row.append({"text": lbl, "callback_data": f"brk_scan:{tf_opt}"})
+    kb_rows.append(tf_row)
+
+    kb_rows.append(
+        [
+            {"text": "⚡ Vadeli İşlem Radarı", "callback_data": f"fut_scan:{tf_up}"},
+            {"text": "🚀 Genel Tarama Tablosu", "callback_data": f"scan:{tf_up}:0"},
+        ]
+    )
+    return {"inline_keyboard": kb_rows}
+
+
+def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timeframe: str = "1h") -> str:
+    """
+    Formats the Multi-Coin Support/Resistance Breakout, Retest, SFP Trap & "How Does a Breakout Happen?" Radar.
+    Separates coins into:
+      1) Active Breakouts / SFP Traps / Retests (Direnç Kırılımı Geldi, Destek Kırılımı Geldi, Tuzak, Retest)
+      2) Approaching Breakout Zones (with exact candle-close + RVOL threshold rules)
+    """
+    tf_up = timeframe.upper()
+    now_hm = time.strftime("%H:%M:%S")
+    lines = [
+        f"🚨 <b>DESTEK / DİRENÇ KIRILIM RADARI &amp; REHBERİ ({tf_up})</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📐 <b>KIRILIM NASIL OLUR? (KURUMSAL TEKNİK KURAL):</b>",
+        "• 📈 <b>Gerçek Direnç Kırılımı:</b> Fiyatın dirence sadece <i>iğne (fitil)</i> atması kırılım <b>değildir</b>! Kapanmış mum <b>gövdesinin</b> direnç bandı üstünde kapanması ve <b>Hacmin (RVOL ≥ 1.20x)</b> artması gerekir. Kırılan direnç <b>Yeni Destek</b> olur.",
+        "• 📉 <b>Gerçek Destek Kırılımı:</b> Kapanmış mum <b>gövdesinin</b> destek bandı altında kapanması gerekir. Kırılan destek <b>Yeni Direnç</b> olur.",
+        "• 🪤 <b>Sahte Kırılım (SFP / Tuzak):</b> Fiyat seviyenin dışına iğne atıp stopları patlattıktan sonra tekrar kanal içine kapanırsa <b>Ters Yöne Dönüş</b> sinyalidir!",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    active_events: List[str] = []
+    near_events: List[str] = []
+
+    for r in rows:
+        sym = str(r.get("symbol", r.get("Coin", "")))
+        fc: Optional[MarketForecast] = r.get("fc")
+        if not fc:
+            continue
+        curr_p = float(r.get("price", 0.0))
+        p_fmt = ",.4f" if curr_p < 10.0 else ",.2f"
+        act_t = getattr(fc, "sr_action_type", "NONE")
+        act_str = getattr(fc, "sr_action_status_tr", "")
+        rvol = float(getattr(fc, "sr_breakout_rvol", 1.0) or 1.0)
+        tl = getattr(fc, "trendlines", None)
+        tl_st = getattr(tl, "breakout_status", "NONE") if tl else "NONE"
+        tl_sum = getattr(tl, "summary_tr", "") if tl else ""
+
+        if act_t in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") or tl_st in ("BULL_BREAKOUT", "BEAR_BREAKDOWN"):
+            msg_txt = act_str if act_t in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") else tl_sum
+            active_events.append(
+                f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)} USDT</code> | Hacim: <b>{rvol:.2f}x</b>)\n"
+                f"  ↳ <b>{msg_txt}</b>\n"
+                f"  ↳ 🎯 Hedef: <code>{format(fc.tp1_price, p_fmt)}</code> ➔ <code>{format(fc.tp2_price, p_fmt)}</code> | 🛡️ Stop: <code>{format(fc.stop_price, p_fmt)}</code>"
+            )
+        elif act_t in ("BULL_SFP", "BEAR_SFP", "BULL_RETEST", "BEAR_RETEST"):
+            active_events.append(
+                f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)} USDT</code> | Hacim: <b>{rvol:.2f}x</b>)\n"
+                f"  ↳ {act_str}"
+            )
+        else:
+            res_obj = fc.resistance_levels[0] if fc.resistance_levels else None
+            sup_obj = fc.support_levels[0] if fc.support_levels else None
+            res_bh = res_obj.band_high if res_obj else (fc.nearest_resistance or curr_p * 1.01)
+            sup_bl = sup_obj.band_low if sup_obj else (fc.nearest_support or curr_p * 0.99)
+            dist_res_pct = abs(res_bh - curr_p) / max(curr_p, 1e-9) * 100.0
+            dist_sup_pct = abs(curr_p - sup_bl) / max(curr_p, 1e-9) * 100.0
+            if dist_res_pct <= dist_sup_pct:
+                near_events.append(
+                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📈 <b>Direnç Kırılımına %{dist_res_pct:.2f}</b> kaldı ➔ "
+                    f"<code>{format(res_bh, p_fmt)}</code> üstü mum kapanışı gerekli"
+                )
+            else:
+                near_events.append(
+                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📉 <b>Destek Kırılımına %{dist_sup_pct:.2f}</b> mesafede ➔ "
+                    f"<code>{format(sup_bl, p_fmt)}</code> altı mum kapanışı tehlikeli"
+                )
+
+    if active_events:
+        lines.append(f"🔥 <b>AKTİF KIRILIM, TUZAK (SFP) &amp; RETEST TESPİTLERİ ({len(active_events)} Coin):</b>")
+        lines.extend(active_events)
+    else:
+        lines.append("ℹ️ <i>Şu an bu zaman diliminde yeni tamamlanmış bir gövde kırılımı bulunmuyor.</i>")
+
+    if near_events:
+        lines.append("")
+        lines.append("⏳ <b>KIRILIM EŞİĞİ TAKİP LİSTESİ (Kırılım İçin Gereken Mum Kapanışı):</b>")
+        lines.extend(near_events[:8])
+
+    lines.extend(
+        [
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"🕒 <i>Son Tarama: {now_hm} | 7/24 Otomatik Kırılım Bildirimleri Aktif!</i>",
+            "<i>👇 Detaylı 4 kart analizini veya grafiğini görmek istediğiniz coine dokunun:</i>",
+        ]
+    )
+    return "\n".join(lines)
+
+
 # ===========================================================================
 # 5. INSTANT DARK-THEME CHART IMAGE GENERATOR (MATPLOTLIB AGG -> PNG BYTES)
 # ===========================================================================
@@ -1319,6 +1458,66 @@ def generate_telegram_chart_png(
             _draw_level(fc.futures_setup.tp1_price, "#38BDF8", "Hedef 1 (TP1)", ":")
             _draw_level(fc.futures_setup.tp2_price, "#10B981", "Hedef 2 (TP2)", ":")
             _draw_level(fc.futures_setup.stop_price, "#FB7185", "Zarar-Kes (Stop)", ":")
+
+        # Draw Dynamic Trendlines & Breakout / SFP / Retest Banner Badge on PNG Chart
+        tl_obj = getattr(fc, "trendlines", None)
+        if tl_obj is not None and "timestamp" in plot_df.columns:
+            ts_list = pd.to_datetime(plot_df["timestamp"]).tolist()
+            if getattr(tl_obj, "has_support_line", False) and tl_obj.sup_x0 is not None and tl_obj.sup_y1 > 0:
+                t0_s = pd.to_datetime(tl_obj.sup_x0)
+                idx0_s = int(np.argmin([abs((t - t0_s).total_seconds()) for t in ts_list]))
+                if y_lo <= tl_obj.sup_y1 <= y_hi:
+                    ax1.plot([idx0_s, len(plot_df) - 1], [tl_obj.sup_y0, tl_obj.sup_y1], color="#10B981", linestyle="-.", linewidth=1.6, zorder=4)
+            if getattr(tl_obj, "has_resistance_line", False) and tl_obj.res_x0 is not None and tl_obj.res_y1 > 0:
+                t0_r = pd.to_datetime(tl_obj.res_x0)
+                idx0_r = int(np.argmin([abs((t - t0_r).total_seconds()) for t in ts_list]))
+                if y_lo <= tl_obj.res_y1 <= y_hi:
+                    ax1.plot([idx0_r, len(plot_df) - 1], [tl_obj.res_y0, tl_obj.res_y1], color="#F43F5E", linestyle="-.", linewidth=1.6, zorder=4)
+
+        sr_act_t = getattr(fc, "sr_action_type", "NONE")
+        sr_act_p = float(getattr(fc, "sr_action_price", 0.0) or 0.0)
+        tl_st_p = getattr(tl_obj, "breakout_status", "NONE") if tl_obj else "NONE"
+        banner_txt = ""
+        banner_col = "#38BDF8"
+        if sr_act_t == "BULL_SR_BREAKOUT":
+            banner_txt = f"DİRENÇ KIRILIMI GELDİ! ({_p(sr_act_p)} Üstü Mum Kapanışı ➔ Yeni Destek)"
+            banner_col = "#00E676"
+        elif sr_act_t == "BEAR_SR_BREAKDOWN":
+            banner_txt = f"DESTEK KIRILIMI GELDİ! ({_p(sr_act_p)} Altı Mum Kapanışı ➔ Yeni Direnç)"
+            banner_col = "#FF5252"
+        elif sr_act_t == "BULL_SFP":
+            banner_txt = f"SAHTE DESTEK KIRILIMI / AYI TUZAĞI (SFP @ {_p(sr_act_p)})"
+            banner_col = "#38BDF8"
+        elif sr_act_t == "BEAR_SFP":
+            banner_txt = f"SAHTE DİRENÇ KIRILIMI / BOĞA TUZAĞI (SFP @ {_p(sr_act_p)})"
+            banner_col = "#F59E0B"
+        elif sr_act_t == "BULL_RETEST":
+            banner_txt = f"ONAYLI DESTEK TESTİ / RETEST ({_p(sr_act_p)})"
+            banner_col = "#34D399"
+        elif sr_act_t == "BEAR_RETEST":
+            banner_txt = f"ONAYLI DİRENÇ REDDİ / RETEST ({_p(sr_act_p)})"
+            banner_col = "#FB7185"
+        elif tl_st_p == "BULL_BREAKOUT":
+            banner_txt = f"DÜŞEN TREND YUKARI KIRILDI! ({_p(tl_obj.res_current_price)})"
+            banner_col = "#00E676"
+        elif tl_st_p == "BEAR_BREAKDOWN":
+            banner_txt = f"YÜKSELEN TREND AŞAĞI KIRILDI! ({_p(tl_obj.sup_current_price)})"
+            banner_col = "#FF5252"
+
+        if banner_txt:
+            ax1.text(
+                0.50,
+                0.93,
+                f" {banner_txt} ",
+                transform=ax1.transAxes,
+                color="#0B0F19",
+                fontsize=8.8,
+                fontweight="bold",
+                ha="center",
+                va="top",
+                bbox=dict(boxstyle="round,pad=0.32", facecolor=banner_col, edgecolor="#0B0F19", alpha=0.94),
+                zorder=8,
+            )
 
         ax1.set_xlim(-1.5, len(plot_df) + 14)
         ax1.set_ylim(y_lo, y_hi)

@@ -47,12 +47,14 @@ from src.telegram_notifier import (
     answer_callback_query,
     build_alarm_radar_inline_keyboard,
     build_analysis_inline_keyboard,
+    build_breakout_radar_inline_keyboard,
     build_coin_list_inline_keyboard,
     build_futures_radar_inline_keyboard,
     build_futures_setup_inline_keyboard,
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
     edit_telegram_message,
+    format_breakout_radar_scan_telegram_html,
     format_forecast_telegram_html,
     format_futures_radar_scan_telegram_html,
     format_futures_setup_telegram_html,
@@ -328,6 +330,7 @@ def _analyze_single_coin_for_scan(
             "Para Akışı (1S)": flow_lbl,
             "Destek / Direnç": f"{sup_s} / {res_s}",
             "fc": fc,
+            "df": df,
         }
     except Exception:
         return None
@@ -447,15 +450,17 @@ def _build_kasa_inline_keyboard(symbol: str, tf_up: str, active_cap: float) -> D
 
 def _build_help_html(chat_id: str) -> str:
     return (
-        "👋 <b>Akıllı Kripto Karar-Destek &amp; Vadeli Radar Terminali (v8.0)</b>\n"
+        "👋 <b>Akıllı Kripto Karar-Destek &amp; Kırılım Radarı Terminali (v9.4)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Artık yazı yazmanıza gerek kalmadan <b>ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
+        "🚨 <b>Destek / Direnç Kırılım &amp; Tuzak (SFP) Radarı:</b>\n"
+        "• <code>/kirilim 1h</code> — <b>Direnç Kırılımı Geldi</b>, <b>Destek Kırılımı Geldi</b>, <b>Sahte Kırılım (Tuzak)</b> ve <b>Retest</b> onaylarını + 'Kırılım Nasıl Olur?' şartlarını listeler\n\n"
         "⚡ <b>Vadeli İşlemler (Futures) Kurulum &amp; Güven Radarı:</b>\n"
         "• <code>/vadeli ONDO 1h</code> — Destek/Direnç, R:R ve Güven Notuna (0-100) Göre Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı (Riskliyse İşlem Önermez!)\n"
         "• <code>/vadelitara 1h</code> — Tüm Coinleri Tarar, Sadece Güvenli Vadeli Kurulumları ve Riskli/Reddedilenleri Ayırır\n\n"
         "📲 <b>Temel Sorgu &amp; Grafik Komutları:</b>\n"
         "• <code>ONDO</code> veya <code>ONDO 4h</code> — 4 Kartlı Detaylı Analiz + Dokunmatik Butonlar\n"
-        "• <code>/grafik ONDO 1h</code> — Destek, Direnç, Mıknatıs ve Hedef Çizgili Grafik Görseli\n"
+        "• <code>/grafik ONDO 1h</code> — Destek, Direnç, Kırılım Rozeti, Mıknatıs ve Hedef Çizgili Grafik Görseli\n"
         "• <code>/miknatis ONDO</code> — 15M/1H/4H/1D Mıknatıs (POC) &amp; Likidasyon Haritası\n"
         "• <code>/kasa ONDO 1000</code> — Stop Mesafesine Göre Kasa &amp; Risk Hesaplayıcı\n\n"
         "🚀 <b>Tarama &amp; Küresel Piyasa Komutları:</b>\n"
@@ -464,7 +469,7 @@ def _build_help_html(chat_id: str) -> str:
         "• <code>/piyasa</code> veya <code>/nakit</code> — Küresel Para Giriş/Çıkışı &amp; Seans Özeti\n\n"
         "⏰ <b>Alarm, Radar &amp; Liste Yönetimi:</b>\n"
         "• <code>/alarm ONDO 0.3620</code> — Hedef Fiyata Anlık Bildirim Alarmı Kurar\n"
-        "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Radar &amp; Alarm Kontrol Paneli\n"
+        "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n"
         "• <code>/liste</code> — Tıklanabilir Coin Seçim Menüsü\n"
         "• <code>/ekle PEPE</code> | <code>/cikar PEPE</code> — İzleme Listesini Düzenler\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -540,7 +545,9 @@ def _check_price_alarms(bot_token: str, chat_id: str) -> None:
 def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False) -> int:
     """
     Scans watchlist in parallel and alerts on high-conviction events:
-      - Readiness >= 4/5 with recent structure breakout/sweep
+      - Support / Resistance Breakout (BULL_SR_BREAKOUT, BEAR_SR_BREAKDOWN) & Dynamic Trendline Breakout
+      - Wick Fakeout / Liquidity Trap (BULL_SFP, BEAR_SFP) & Confirmed Retest (BULL_RETEST, BEAR_RETEST)
+      - Readiness >= 4/5 with strong directional conviction
       - Strong Whale Accumulation (>= 70/100) or Distribution (<= 30/100)
       - High Volatility Squeeze (>= 80%)
     Respects a 2-hour per-coin cooldown unless force=True.
@@ -564,6 +571,43 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
             continue
 
         reasons: List[str] = []
+        sr_act = getattr(fc, "sr_action_type", "NONE")
+        sr_status_tr = getattr(fc, "sr_action_status_tr", "")
+        sr_guide_tr = getattr(fc, "sr_breakout_guide_tr", "")
+        tl_rep = getattr(fc, "trendlines", None)
+        tl_brk = getattr(tl_rep, "breakout_status", "NONE") if tl_rep else "NONE"
+        tl_sum = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
+
+        is_breakout_event = False
+        header_title = f"📡 <b>OTOMATİK RADAR UYARISI: {sym} [1H]</b>"
+
+        if sr_act == "BULL_SR_BREAKOUT":
+            is_breakout_event = True
+            header_title = f"🚀 <b>DİRENÇ KIRILIMI GELDİ: {sym} [1H]</b>"
+            reasons.append(f"🚀 <b>Kırılım Onayı:</b> {sr_status_tr}")
+        elif sr_act == "BEAR_SR_BREAKDOWN":
+            is_breakout_event = True
+            header_title = f"🩸 <b>DESTEK KIRILIMI GELDİ: {sym} [1H]</b>"
+            reasons.append(f"🩸 <b>Kırılım Onayı:</b> {sr_status_tr}")
+        elif sr_act in ("BULL_SFP", "BEAR_SFP"):
+            is_breakout_event = True
+            header_title = f"🪤 <b>SAHTE KIRILIM (TUZAK / SFP) UYARISI: {sym} [1H]</b>"
+            reasons.append(f"🪤 <b>Tuzak Tespit Edildi:</b> {sr_status_tr}")
+        elif sr_act in ("BULL_RETEST", "BEAR_RETEST"):
+            is_breakout_event = True
+            header_title = f"🔄 <b>KIRILIM SONRASI RETEST ONAYI: {sym} [1H]</b>"
+            reasons.append(f"🔄 <b>Retest Onayı:</b> {sr_status_tr}")
+
+        if tl_brk in ("BULL_BREAKOUT", "BEAR_BREAKDOWN"):
+            is_breakout_event = True
+            if sr_act == "NONE":
+                header_title = (
+                    f"📐 <b>DÜŞEN TREND KIRILIMI GELDİ: {sym} [1H]</b>"
+                    if tl_brk == "BULL_BREAKOUT"
+                    else f"📐 <b>YÜKSELEN TREND KIRILIMI GELDİ: {sym} [1H]</b>"
+                )
+            reasons.append(f"📐 <b>Dinamik Trend Kırılımı:</b> {tl_sum}")
+
         if fc.readiness_score_5 >= 4 and abs(fc.score) >= 22:
             tr_txt = "YÜKSELİŞ" if fc.score > 0 else "DÜŞÜŞ"
             reasons.append(f"🚦 <b>Güçlü {tr_txt} Kurulumu:</b> Hazırlık <b>{fc.readiness_score_5}/5</b> (Puan: {fc.score:+.0f}/100)")
@@ -580,19 +624,36 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
             res_s = format(fc.nearest_resistance, p_fmt) if fc.nearest_resistance else "N/A"
             tp1_s = format(fc.tp1_price, p_fmt) if fc.tp1_price > 0 else "N/A"
             stop_s = format(fc.stop_price, p_fmt) if fc.stop_price > 0 else "N/A"
+            guide_line = f"• 📐 <b>Kırılım Nasıl Olur?:</b> {sr_guide_tr}\n" if sr_guide_tr else ""
 
             radar_html = (
-                f"📡 <b>OTOMATİK RADAR UYARISI: {sym} [1H]</b>\n"
+                f"{header_title}\n"
                 f"💰 <b>Fiyat:</b> <code>{r['price_str']} USDT</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 + "\n".join([f"• { rs }" for rs in reasons])
                 + "\n\n"
-                f"• 🟢 <b>Destek:</b> <code>{sup_s}</code> | 🔴 <b>Direnç:</b> <code>{res_s}</code>\n"
+                + guide_line
+                + f"• 🟢 <b>Destek:</b> <code>{sup_s}</code> | 🔴 <b>Direnç:</b> <code>{res_s}</code>\n"
                 f"• 🎯 <b>1. Hedef:</b> <code>{tp1_s}</code> | 🛡️ <b>Stop:</b> <code>{stop_s}</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             )
             kb = build_analysis_inline_keyboard(sym, "1H")
             send_telegram_message(bot_token, chat_id, radar_html, reply_markup=kb)
+
+            # Automatically attach annotated chart PNG when a structural breakout/trap occurs
+            if is_breakout_event and r.get("df") is not None:
+                try:
+                    png_b = generate_telegram_chart_png(r["df"], fc, sym, "1H")
+                    if png_b:
+                        send_telegram_photo(
+                            bot_token,
+                            chat_id,
+                            png_b,
+                            caption_html=f"🖼️ <b>{sym} [1H] Kırılım &amp; Kritik Seviyeler Grafiği</b>",
+                        )
+                except Exception:
+                    pass
+
             cooldowns[sym] = now_ts
             alerts_sent += 1
             if alerts_sent >= 3 and not force:
@@ -923,6 +984,29 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
                 send_telegram_message(bot_token, chat_id, html_fs, reply_markup=kb_fs)
         else:
             send_telegram_message(bot_token, chat_id, html_fs, reply_markup=kb_fs)
+
+    # 13. Support / Resistance Breakout & Trap Radar Scan: brk_scan:TF
+    elif action == "brk_scan":
+        tf = parts[1] if len(parts) >= 2 else "1H"
+        answer_callback_query(bot_token, cq_id, f"🚨 [{tf}] Destek/Direnç Kırılım & Tuzak Radarı taranıyor...")
+        with _CACHE_LOCK:
+            cached_s = _SCAN_CACHE.get(tf.lower())
+            is_cold_s = (cached_s is None) or ((time.time() - cached_s[0]) > CACHE_TTL_SEC)
+        if is_cold_s and not is_photo_msg and msg_id:
+            edit_telegram_message(
+                bot_token,
+                chat_id,
+                msg_id,
+                f"🚨 <b>[{tf.upper()}]</b> Destek/Direnç Kırılım, Tuzak (SFP) ve Retest Radarı tüm coinlerde taranıyor...",
+            )
+        _, _, results = _scan_watchlist_parallel(tf, only_high_quality=False)
+        html_brk = format_breakout_radar_scan_telegram_html(results, tf)
+        kb_brk = build_breakout_radar_inline_keyboard(results, tf)
+        if not is_photo_msg and msg_id:
+            if not edit_telegram_message(bot_token, chat_id, msg_id, html_brk, reply_markup=kb_brk):
+                send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
+        else:
+            send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
     else:
         answer_callback_query(bot_token, cq_id, "✅ İşlem alındı.")
 
@@ -936,6 +1020,8 @@ def _map_reply_keyboard_text(raw_text: str) -> str:
     t_low = t.lower()
     if "coin seç" in t_low or "coin listesi" in t_low or t.startswith("🪙"):
         return "/liste"
+    if "kırılım" in t_low or "kirilim" in t_low or t.startswith("🚨"):
+        return "/kirilim 1h"
     if "vadeli" in t_low or t.startswith("⚡"):
         return "/vadelitara 1h"
     if "tümünü tara" in t_low or t.startswith("🚀"):
@@ -1077,6 +1163,18 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             html_fs = format_futures_radar_scan_telegram_html(results, tf)
             kb_fs = build_futures_radar_inline_keyboard(results, tf)
             send_telegram_message(bot_token, chat_id, html_fs, reply_markup=kb_fs)
+
+        elif cmd in ("/kirilim", "/kirilimtara", "/breakout"):
+            tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("15m", "1h", "4h", "1d")) else "1h"
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🚨 <b>[{tf.upper()}]</b> Destek/Direnç Kırılım, Tuzak (SFP) ve 'Kırılım Nasıl Olur?' Radarı taranıyor...",
+            )
+            _, _, results = _scan_watchlist_parallel(tf, only_high_quality=False)
+            html_brk = format_breakout_radar_scan_telegram_html(results, tf)
+            kb_brk = build_breakout_radar_inline_keyboard(results, tf)
+            send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
 
         elif cmd == "/tara":
             tf = parts[1].lower() if len(parts) >= 2 else "1h"

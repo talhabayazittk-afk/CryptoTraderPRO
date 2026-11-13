@@ -241,11 +241,13 @@ class MarketForecast:
     divergences: List[DivergenceSignal] = field(default_factory=list)
     factor_notes_tr: List[str] = field(default_factory=list)
 
-    # v9.2 5-Module Institutional Price-Action & MTF Extensions
-    sr_action_type: str = "NONE"  # "BULL_SFP", "BULL_RETEST", "BEAR_SFP", "BEAR_RETEST", "NONE"
+    # v9.2-v9.4 Institutional Price-Action, S/R Breakout & MTF Extensions
+    sr_action_type: str = "NONE"  # "BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN", "BULL_SFP", "BULL_RETEST", "BEAR_SFP", "BEAR_RETEST", "NONE"
     sr_action_status_tr: str = "Aktif Kırılım Testi (Retest) veya Tuzak (SFP) Yok"
     sr_action_price: float = 0.0
     sr_action_time: Optional[pd.Timestamp] = None
+    sr_breakout_rvol: float = 1.0
+    sr_breakout_guide_tr: str = ""
     leverage_squeeze_status_tr: str = "Normal Kaldıraç Dengesi"
     trendlines: DynamicTrendlineReport = field(default_factory=DynamicTrendlineReport)
 
@@ -1198,6 +1200,85 @@ class SignalEngine:
 
         recent = closed_df.tail(5)
         p_fmt = ",.4f" if live_close < 10.0 else ",.2f"
+        vol_col = closed_df["volume"].to_numpy(dtype=float) if "volume" in closed_df.columns else np.ones(len(closed_df))
+        avg_vol_20 = float(np.mean(vol_col[-21:-1])) if len(vol_col) >= 5 else float(np.mean(vol_col))
+        avg_vol_20 = max(avg_vol_20, 1e-9)
+
+        # 0A. Check FRESH RESISTANCE BREAKOUT (Direnç Kırılımı Geldi! -> Eski Direnç Yeni Destek Oldu)
+        # When price just broke above a resistance level on the last 1-2 closed candles, that level is now in `supports[0]`.
+        if supports and len(closed_df) >= 6:
+            sup = supports[0]
+            pre_closes = closed_df["close"].iloc[-6:-1].to_numpy(dtype=float)
+            # Check if at least 2 of the previous candles were closed BELOW this level's band_high (meaning it acted as Resistance)
+            if int(np.sum(pre_closes <= sup.band_high + 0.05 * atr_val)) >= 2:
+                for idx_back in (-1, -2):
+                    row = closed_df.iloc[idx_back]
+                    prev_row = closed_df.iloc[idx_back - 1]
+                    cl_v = float(row["close"])
+                    op_v = float(row["open"])
+                    hi_v = float(row["high"])
+                    lo_v = float(row["low"])
+                    prev_cl = float(prev_row["close"])
+                    vol_v = float(row.get("volume", avg_vol_20))
+                    rvol = vol_v / avg_vol_20
+                    ts_v = row["timestamp"] if "timestamp" in row else None
+                    rng = max(hi_v - lo_v, 1e-9)
+                    body_ratio = abs(cl_v - op_v) / rng
+
+                    # True Breakout Logic: Previous close was below/inside resistance, and this closed candle's BODY closed decisively above band_high!
+                    if (
+                        prev_cl <= sup.band_high + 0.05 * atr_val
+                        and cl_v > sup.band_high
+                        and cl_v > op_v
+                        and body_ratio >= 0.38
+                        and live_close >= sup.price
+                    ):
+                        vol_tag = f"🔥 {rvol:.2f}x Hacimli " if rvol >= 1.20 else f"Gövde Kapanışlı ({rvol:.2f}x Hacim) "
+                        return (
+                            "BULL_SR_BREAKOUT",
+                            f"🚀 DİRENÇ KIRILIMI GELDİ! {format(sup.price, p_fmt)} Tavanı {vol_tag}Mum Kapanışıyla Yukarı Kırıldı (Eski Direnç ➔ Yeni Destek Oldu)",
+                            float(sup.price),
+                            ts_v,
+                            20.0 if rvol >= 1.20 else 15.0,
+                        )
+
+        # 0B. Check FRESH SUPPORT BREAKDOWN (Destek Kırılımı Geldi! -> Eski Destek Yeni Direnç Oldu)
+        # When price just broke below a support level on the last 1-2 closed candles, that level is now in `resistances[0]`.
+        if resistances and len(closed_df) >= 6:
+            res = resistances[0]
+            pre_closes = closed_df["close"].iloc[-6:-1].to_numpy(dtype=float)
+            # Check if at least 2 of the previous candles were closed ABOVE this level's band_low (meaning it acted as Support)
+            if int(np.sum(pre_closes >= res.band_low - 0.05 * atr_val)) >= 2:
+                for idx_back in (-1, -2):
+                    row = closed_df.iloc[idx_back]
+                    prev_row = closed_df.iloc[idx_back - 1]
+                    cl_v = float(row["close"])
+                    op_v = float(row["open"])
+                    hi_v = float(row["high"])
+                    lo_v = float(row["low"])
+                    prev_cl = float(prev_row["close"])
+                    vol_v = float(row.get("volume", avg_vol_20))
+                    rvol = vol_v / avg_vol_20
+                    ts_v = row["timestamp"] if "timestamp" in row else None
+                    rng = max(hi_v - lo_v, 1e-9)
+                    body_ratio = abs(cl_v - op_v) / rng
+
+                    # True Breakdown Logic: Previous close was above/inside support, and this closed candle's BODY closed decisively below band_low!
+                    if (
+                        prev_cl >= res.band_low - 0.05 * atr_val
+                        and cl_v < res.band_low
+                        and cl_v < op_v
+                        and body_ratio >= 0.38
+                        and live_close <= res.price
+                    ):
+                        vol_tag = f"🔥 {rvol:.2f}x Hacimli " if rvol >= 1.20 else f"Gövde Kapanışlı ({rvol:.2f}x Hacim) "
+                        return (
+                            "BEAR_SR_BREAKDOWN",
+                            f"🩸 DESTEK KIRILIMI GELDİ! {format(res.price, p_fmt)} Desteği {vol_tag}Mum Kapanışıyla Aşağı Kırıldı (Eski Destek ➔ Yeni Direnç Oldu)",
+                            float(res.price),
+                            ts_v,
+                            -20.0 if rvol >= 1.20 else -15.0,
+                        )
 
         # 1. Check Bullish SFP (Bear Trap) & Bullish S/R Flip Retest at 1st Support
         if supports:
@@ -1213,7 +1294,7 @@ class SignalEngine:
                 if lo_v < sup.price - 0.05 * atr_val and cl_v >= sup.price and lower_wick >= 0.30 * atr_val and live_close >= sup.band_low:
                     return (
                         "BULL_SFP",
-                        f"🪤 Boğa SFP (Ayı Tuzağı Avı): Fiyat {format(sup.price, p_fmt)} Desteği Altındaki Stopları Süpürüp Üzerinde Kapattı!",
+                        f"🪤 SAHTE DESTEK KIRILIMI (Boğa SFP / Ayı Tuzağı): Fiyat {format(sup.price, p_fmt)} Desteği Altına İğne Atıp Stopları Süpürdü ve Üzerinde Kapattı!",
                         float(lo_v),
                         ts_v,
                         16.0,
@@ -1243,7 +1324,7 @@ class SignalEngine:
                 if hi_v > res.price + 0.05 * atr_val and cl_v <= res.price and upper_wick >= 0.30 * atr_val and live_close <= res.band_high:
                     return (
                         "BEAR_SFP",
-                        f"🪤 Ayı SFP (Boğa Tuzağı Avı): Fiyat {format(res.price, p_fmt)} Direnci Üstündeki Stopları Süpürüp Altında Kapattı!",
+                        f"🪤 SAHTE DİRENÇ KIRILIMI (Ayı SFP / Boğa Tuzağı): Fiyat {format(res.price, p_fmt)} Direnci Üstüne İğne Atıp Stopları Süpürdü ve Altında Kapattı!",
                         float(hi_v),
                         ts_v,
                         -16.0,
@@ -1636,7 +1717,7 @@ class SignalEngine:
         strongest_sup_obj = max(supports, key=lambda x: x.strength_score) if supports else None
         strongest_res_obj = max(resistances, key=lambda x: x.strength_score) if resistances else None
 
-        # Module 3: Detect Confirmed S/R Flip Retests & SFP Traps on Closed Candles
+        # Module 3: Detect Confirmed S/R Breakouts, Flip Retests & SFP Traps on Closed Candles
         sr_action_type, sr_action_status_tr, sr_action_price, sr_action_time, sr_action_boost = self.detect_retest_and_sfp(
             closed_df=closed_df,
             live_close=live_close,
@@ -1645,6 +1726,18 @@ class SignalEngine:
             atr_val=atr_val,
         )
         s_score += sr_action_boost
+
+        # Compute RVOL of last closed candle & "How Does a Breakout Happen?" technical rule guide
+        vol_arr_c = closed_df["volume"].to_numpy(dtype=float) if "volume" in closed_df.columns and len(closed_df) >= 2 else np.ones(5)
+        avg_v20_c = max(float(np.mean(vol_arr_c[-21:-1])) if len(vol_arr_c) >= 5 else float(np.mean(vol_arr_c)), 1e-9)
+        sr_breakout_rvol = float(vol_arr_c[-1]) / avg_v20_c
+        res_break_band = resistances[0].band_high if resistances else (nearest_res * 1.002)
+        sup_break_band = supports[0].band_low if supports else (nearest_sup * 0.998)
+        p_fmt_g = ",.4f" if live_close < 10.0 else ",.2f"
+        sr_breakout_guide_tr = (
+            f"📈 Direnç Kırılım Şartı: {format(res_break_band, p_fmt_g)} USDT Üstü Mum Gövde Kapanışı + Hacim (RVOL ≥ 1.20x) | "
+            f"📉 Destek Kırılım Şartı: {format(sup_break_band, p_fmt_g)} USDT Altı Mum Gövde Kapanışı (Sadece iğne atıp dönerse = 🪤 Sahte Kırılım / SFP)"
+        )
 
         # Module 4: Detect Automatic Dynamic Trendlines & Trendline Breakouts on Closed Candles
         trendlines, trendline_boost = self.detect_dynamic_trendlines(
@@ -2166,6 +2259,8 @@ class SignalEngine:
             sr_action_status_tr=sr_action_status_tr,
             sr_action_price=sr_action_price,
             sr_action_time=sr_action_time,
+            sr_breakout_rvol=sr_breakout_rvol,
+            sr_breakout_guide_tr=sr_breakout_guide_tr,
             leverage_squeeze_status_tr=futures_setup.leverage_squeeze_status_tr if futures_setup else "Normal Kaldıraç Dengesi",
             trendlines=trendlines,
         )
@@ -2544,10 +2639,12 @@ class SignalEngine:
             else:
                 conf_pts += 7.5
 
-        # Pillar E: Smart Money Structure (BOS / CHoCH / Sweep / OB / Retest / SFP / Trendline Breakout) (0 - 14 pts)
+        # Pillar E: Smart Money Structure (BOS / CHoCH / Sweep / OB / Breakout / Retest / SFP / Trendline Breakout) (0 - 14 pts)
         if cand_dir in ("LONG", "SHORT"):
-            if (is_long and sr_action_type in ("BULL_SFP", "BULL_RETEST")) or (is_short and sr_action_type in ("BEAR_SFP", "BEAR_RETEST")):
-                conf_pts += 13.0
+            if (is_long and sr_action_type in ("BULL_SR_BREAKOUT", "BULL_SFP", "BULL_RETEST")) or (
+                is_short and sr_action_type in ("BEAR_SR_BREAKDOWN", "BEAR_SFP", "BEAR_RETEST")
+            ):
+                conf_pts += 14.0 if "BREAK" in sr_action_type else 13.0
                 positives.append(sr_action_status_tr)
             elif (is_long and tl_status == "BULL_BREAKOUT") or (is_short and tl_status == "BEAR_BREAKDOWN"):
                 conf_pts += 12.5

@@ -1049,28 +1049,64 @@ class InteractiveChartVisualizer:
                 sr_act_p = float(getattr(fc, "sr_action_price", 0.0) or 0.0)
                 if sr_act_t != "NONE" and sr_act_p > 0:
                     is_bull_act = "BULL" in sr_act_t
-                    act_lbl = "🪤 Dip SFP (Tuzak)" if sr_act_t == "BULL_SFP" else (
-                        "🪤 Tepe SFP (Tuzak)" if sr_act_t == "BEAR_SFP" else (
-                            "🔄 Yukarı Retest Onayı" if sr_act_t == "BULL_RETEST" else "🔄 Aşağı Retest Onayı"
-                        )
-                    )
+                    if sr_act_t == "BULL_SR_BREAKOUT":
+                        act_lbl = "🚀 DİRENÇ KIRILIMI GELDİ! (Yeni Destek)"
+                        act_col = "#00E676"
+                    elif sr_act_t == "BEAR_SR_BREAKDOWN":
+                        act_lbl = "🩸 DESTEK KIRILIMI GELDİ! (Yeni Direnç)"
+                        act_col = "#FF5252"
+                    elif sr_act_t == "BULL_SFP":
+                        act_lbl = "🪤 Sahte Destek Kırılımı / Dip SFP (Tuzak)"
+                        act_col = "#38BDF8"
+                    elif sr_act_t == "BEAR_SFP":
+                        act_lbl = "🪤 Sahte Direnç Kırılımı / Tepe SFP (Tuzak)"
+                        act_col = "#F59E0B"
+                    elif sr_act_t == "BULL_RETEST":
+                        act_lbl = "🔄 Yukarı Kırılım / Destek Retest Onayı"
+                        act_col = "#34D399"
+                    else:
+                        act_lbl = "🔄 Direnç Reddi / Aşağı Retest Onayı"
+                        act_col = "#FB7185"
                     ann_for_tf.append(
                         dict(
                             xref="paper",
                             yref="y",
-                            x=0.52,
+                            x=0.48,
                             y=sr_act_p,
                             xanchor="center",
                             yanchor="bottom" if is_bull_act else "top",
                             text=f"<b>{act_lbl}: {format(sr_act_p, p_fmt)}</b>",
                             showarrow=False,
-                            font=dict(size=10.5, color="#38BDF8" if is_bull_act else "#F59E0B"),
-                            bgcolor="rgba(15, 23, 42, 0.92)",
-                            bordercolor="#38BDF8" if is_bull_act else "#F59E0B",
-                            borderwidth=1,
-                            borderpad=2,
+                            font=dict(size=11, color=act_col),
+                            bgcolor="rgba(11, 15, 25, 0.95)",
+                            bordercolor=act_col,
+                            borderwidth=1.4,
+                            borderpad=3,
                         )
                     )
+                elif tl_obj is not None and getattr(tl_obj, "breakout_status", "NONE") in ("BULL_BREAKOUT", "BEAR_BREAKDOWN"):
+                    is_bull_tl = tl_obj.breakout_status == "BULL_BREAKOUT"
+                    tl_p = tl_obj.res_current_price if is_bull_tl else tl_obj.sup_current_price
+                    tl_lbl = "📐 🟢 DÜŞEN TREND KIRILIMI GELDİ!" if is_bull_tl else "📐 🔴 YÜKSELEN TREND KIRILIMI GELDİ!"
+                    tl_col = "#00E676" if is_bull_tl else "#FF5252"
+                    if tl_p > 0:
+                        ann_for_tf.append(
+                            dict(
+                                xref="paper",
+                                yref="y",
+                                x=0.48,
+                                y=tl_p,
+                                xanchor="center",
+                                yanchor="bottom" if is_bull_tl else "top",
+                                text=f"<b>{tl_lbl}: {format(tl_p, p_fmt)}</b>",
+                                showarrow=False,
+                                font=dict(size=11, color=tl_col),
+                                bgcolor="rgba(11, 15, 25, 0.95)",
+                                bordercolor=tl_col,
+                                borderwidth=1.4,
+                                borderpad=3,
+                            )
+                        )
 
             # Smart Money Concepts (SMC): Unfilled FVG & Order Block Boxes
             if show_smc and fc.smc and len(df) >= 3:

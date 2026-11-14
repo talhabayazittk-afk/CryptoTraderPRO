@@ -35,9 +35,11 @@ if (
     or not hasattr(src.telegram_notifier, "build_analysis_inline_keyboard")
     or not hasattr(src.telegram_notifier, "build_futures_radar_inline_keyboard")
     or not hasattr(src.telegram_notifier, "build_breakout_radar_inline_keyboard")
+    or not hasattr(src.telegram_notifier, "build_watchlist_manage_inline_keyboard")
     or not hasattr(src.telegram_notifier, "format_breakout_radar_scan_telegram_html")
     or not hasattr(src.signals, "FuturesSetupReport")
     or not hasattr(src.signals.MarketForecast, "sr_breakout_guide_tr")
+    or not hasattr(src.signals.MarketForecast, "plain_guidance_tr")
 ):
     for _mod in (
         src.config,
@@ -282,19 +284,36 @@ st.markdown(
             opacity: 1;
             visibility: visible;
         }
+        .roadmap-banner {
+            background: linear-gradient(95deg, rgba(15, 23, 42, 0.96) 0%, rgba(17, 24, 39, 0.92) 100%);
+            border: 1px solid #334155;
+            border-left: 5px solid #38BDF8;
+            border-radius: 10px;
+            padding: 12px 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+            font-size: 13.5px;
+            line-height: 1.55;
+            color: #E2E8F0;
+        }
         @media (max-width: 768px) {
             .block-container {
-                padding-top: 0.7rem;
-                padding-left: 0.5rem;
-                padding-right: 0.5rem;
+                padding-top: 0.6rem;
+                padding-left: 0.45rem;
+                padding-right: 0.45rem;
                 max-width: 100%;
             }
             .kpi-value {
-                font-size: 17px;
+                font-size: 16.5px;
             }
             .kpi-card {
                 padding: 10px 12px;
                 margin-bottom: 8px;
+                border-radius: 9px;
+            }
+            .roadmap-banner {
+                padding: 10px 12px;
+                font-size: 12.8px;
             }
             .help-tip::after {
                 width: 220px;
@@ -336,7 +355,7 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v9.4",
+    _engine_version: str = "v10.0",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
     Parallel cached pipeline (v3.0):
@@ -409,10 +428,12 @@ def load_coin_intelligence(
 
 
 # ---------------------------------------------------------------------------
-# PERSISTENT SESSION STATE FOR DYNAMIC COIN WATCHLIST
+# PERSISTENT SESSION STATE FOR DYNAMIC COIN WATCHLIST (SYNCED WITH TELEGRAM)
 # ---------------------------------------------------------------------------
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = load_watchlist()
+_disk_wl = load_watchlist()
+if "watchlist" not in st.session_state or st.session_state.get("_last_disk_wl") != _disk_wl:
+    st.session_state.watchlist = list(_disk_wl)
+    st.session_state["_last_disk_wl"] = list(_disk_wl)
 
 # ---------------------------------------------------------------------------
 # SIDEBAR: WATCHLIST MANAGEMENT & CHART SETTINGS
@@ -895,23 +916,32 @@ with col_sel3:
 # ---------------------------------------------------------------------------
 # 1. COMPACT STATUS & MULTI-TIMEFRAME ALIGNMENT BAR
 # ---------------------------------------------------------------------------
-score_col = "#00E676" if fc_active.score >= 15 else ("#FF5252" if fc_active.score <= -15 else "#FACC15")
-if fc_active.score >= 15:
+trend_state_act = getattr(fc_active, "trend_state", "")
+swing_struct_act = getattr(fc_active, "swing_structure_tr", "Yatay Kanal")
+candle_anat_act = getattr(fc_active, "candle_anatomy_tr", "")
+plain_guide_act = getattr(fc_active, "plain_guidance_tr", "")
+
+if trend_state_act == "UPTREND" or (not trend_state_act and fc_active.score >= 15):
+    score_col = "#00E676"
     main_trend_title = "📈 YÜKSELEN TREND"
-    main_trend_desc = "Alıcılar baskın, yön yukarı"
-elif fc_active.score <= -15:
+    main_trend_desc = f"{swing_struct_act} — Alıcılar baskın"
+elif trend_state_act == "DOWNTREND" or (not trend_state_act and fc_active.score <= -15):
+    score_col = "#FF5252"
     main_trend_title = "📉 DÜŞEN TREND"
-    main_trend_desc = "Satıcılar baskın, yön aşağı"
+    main_trend_desc = f"{swing_struct_act} — Satıcılar baskın"
 else:
+    score_col = "#FACC15"
     main_trend_title = "⚖️ YATAY / KARARSIZ TREND"
-    main_trend_desc = "Alıcı ve satıcılar dengede, kırılım bekleniyor"
+    main_trend_desc = f"{swing_struct_act} — Kırılım yönü bekleniyor"
 
 mtf_badges_html = []
 for tf_k in ("15M", "1H", "4H", "1D"):
-    sc_k = tf_forecasts[tf_k].score
-    if sc_k >= 15:
+    fc_tf_k = tf_forecasts[tf_k]
+    sc_k = fc_tf_k.score
+    t_st_k = getattr(fc_tf_k, "trend_state", "")
+    if t_st_k == "UPTREND" or (not t_st_k and sc_k >= 15):
         c_k, lbl_k = "#00E676", "📈 Yükselen"
-    elif sc_k <= -15:
+    elif t_st_k == "DOWNTREND" or (not t_st_k and sc_k <= -15):
         c_k, lbl_k = "#FF5252", "📉 Düşen"
     else:
         c_k, lbl_k = "#FACC15", "⚖️ Yatay"
@@ -937,7 +967,7 @@ else:
 
 st.markdown(
     f"""
-    <div style="background:#111827; border:1px solid #1E293B; border-left:5px solid {score_col}; border-radius:10px; padding:11px 16px; margin-bottom:14px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px;">
+    <div style="background:#111827; border:1px solid #1E293B; border-left:5px solid {score_col}; border-radius:10px; padding:11px 16px; margin-bottom:10px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px;">
         <div style="font-size:14px;">
             <b style="color:#F8FAFC; font-size:15px;">{active_symbol} ({active_tf}) <span style="color:#64748B; font-size:12px;">[{source_used}]</span>:</b>
             <span style="color:{score_col}; font-weight:800; font-size:15px; margin-left:6px;">{main_trend_title} ({fc_active.score:+.0f}/100)</span>
@@ -952,6 +982,17 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if plain_guide_act:
+    st.markdown(
+        f"""
+        <div class="roadmap-banner" style="border-left-color:{score_col};">
+            <b style="color:#38BDF8;">🧭 SADE YOL HARİTASI (HİÇ VERİ BİLMEYENLER İÇİN TEKNİK ÖZET):</b>
+            <span style="margin-left:6px;">{plain_guide_act}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # 2. 4 CONCISE, READABLE & JARGON-FREE CARDS (TREND, S/R, MONEY FLOW, MAGNETS)
@@ -1062,20 +1103,21 @@ with c1:
         breakout_line_html = f"• <b>Seviye Onayı / Tuzak:</b> <b style='color:#38BDF8;'>{sr_act_str}</b>"
     else:
         breakout_line_html = f"• <b>Kırılım İzi:</b> {breakout_text}"
-    tl_line_html = f"• <b>Dinamik Kanal:</b> {tl_summary}<br>" if tl_summary else ""
+    candle_line_html = f"• 🕯️ <b>Mum Anatomisi:</b> {candle_anat_act}<br>" if candle_anat_act else ""
+    tl_line_html = f"• 📐 <b>Tepe/Dip & Kanal:</b> <b>{swing_struct_act}</b>{f' · {tl_summary}' if tl_summary else ''}<br>"
     guide_line_html = (
-        f"• <b>📐 Kırılım Nasıl Olur?:</b> <span style='color:#E2E8F0;'>{sr_guide_str}</span>"
+        f"• <b>🎯 Kırılım Özeti:</b> <span style='color:#E2E8F0;'>{sr_guide_str}</span>"
         if sr_guide_str
         else f"• <b>Yukarı / Aşağı Eşik:</b> <b style='color:#00E676;'>{price_fmt(up_break_price)}</b> üstü / <b style='color:#FF5252;'>{price_fmt(down_break_price)}</b> altı"
     )
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid {score_col};">
-            <div class="kpi-title">1️⃣ MEVCUT TREND & KIRILIMLAR ({active_tf})</div>
+            <div class="kpi-title">1️⃣ TREND, YAPI & MUM ANATOMİSİ ({active_tf})</div>
             <div class="kpi-value" style="color:{score_col};">{main_trend_title}</div>
-            <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                {breakout_line_html}<br>
-                {tl_line_html}• <b>Sıkışma Durumu:</b> {squeeze_short}<br>
+            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
+                {tl_line_html}{candle_line_html}{breakout_line_html}<br>
+                • <b>Sıkışma Durumu:</b> {squeeze_short}<br>
                 {guide_line_html}
             </div>
         </div>

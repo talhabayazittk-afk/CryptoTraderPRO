@@ -16,6 +16,7 @@ import pandas as pd
 from .config import IndicatorConfig
 from .data_fetcher import OrderFlowIntel
 from .indicators import TechnicalIndicators
+from .patterns import CandlestickPatternDetector
 from .smart_money import RiskPositionPlan, SmartMoneyEngine, SmartMoneyReport
 
 
@@ -241,7 +242,7 @@ class MarketForecast:
     divergences: List[DivergenceSignal] = field(default_factory=list)
     factor_notes_tr: List[str] = field(default_factory=list)
 
-    # v9.2-v9.4 Institutional Price-Action, S/R Breakout & MTF Extensions
+    # v9.2-v9.5 Institutional Price-Action, Swing Structure, Candle Anatomy & Plain Guidance Extensions
     sr_action_type: str = "NONE"  # "BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN", "BULL_SFP", "BULL_RETEST", "BEAR_SFP", "BEAR_RETEST", "NONE"
     sr_action_status_tr: str = "Aktif Kırılım Testi (Retest) veya Tuzak (SFP) Yok"
     sr_action_price: float = 0.0
@@ -250,6 +251,10 @@ class MarketForecast:
     sr_breakout_guide_tr: str = ""
     leverage_squeeze_status_tr: str = "Normal Kaldıraç Dengesi"
     trendlines: DynamicTrendlineReport = field(default_factory=DynamicTrendlineReport)
+    trend_state: str = "SIDEWAYS"  # "UPTREND", "DOWNTREND", or "SIDEWAYS"
+    swing_structure_tr: str = "Yatay Kanal"
+    candle_anatomy_tr: str = ""
+    plain_guidance_tr: str = ""
 
 
 class SignalEngine:
@@ -295,17 +300,23 @@ class SignalEngine:
         out["regime_oversold"] = (is_rsi_oversold | is_bb_lower_touch).fillna(False)
         out["regime_overbought"] = (is_rsi_overbought | is_bb_upper_touch).fillna(False)
 
-        # 2. Pattern Groups (including new Morning Star, Evening Star, Inverted Hammer, Hanging Man)
+        # 2. Pattern Groups (including Morning Star, Evening Star, Inverted Hammer, Hanging Man, Tweezer, Marubozu)
         morning_star = out.get("pattern_morning_star", pd.Series(False, index=out.index))
         evening_star = out.get("pattern_evening_star", pd.Series(False, index=out.index))
         inv_hammer = out.get("pattern_inverted_hammer", pd.Series(False, index=out.index))
         hanging_man = out.get("pattern_hanging_man", pd.Series(False, index=out.index))
+        tweezer_bot = out.get("pattern_tweezer_bottom", pd.Series(False, index=out.index))
+        tweezer_top = out.get("pattern_tweezer_top", pd.Series(False, index=out.index))
+        bull_marubozu = out.get("pattern_bullish_marubozu", pd.Series(False, index=out.index))
+        bear_marubozu = out.get("pattern_bearish_marubozu", pd.Series(False, index=out.index))
 
         bullish_patterns = (
             morning_star
             | out["pattern_bullish_engulfing"]
             | out["pattern_hammer"]
             | inv_hammer
+            | tweezer_bot
+            | bull_marubozu
             | out["pattern_dragonfly_doji"]
         )
         bearish_patterns = (
@@ -313,6 +324,8 @@ class SignalEngine:
             | out["pattern_bearish_engulfing"]
             | out["pattern_shooting_star"]
             | hanging_man
+            | tweezer_top
+            | bear_marubozu
             | out["pattern_gravestone_doji"]
         )
         standard_doji = (
@@ -327,7 +340,7 @@ class SignalEngine:
         strong_bullish_reversal = (
             morning_star
             | (out["pattern_bullish_engulfing"] & near_oversold & vol_confirmed)
-            | ((out["pattern_hammer"] | out["pattern_dragonfly_doji"]) & (out["regime_oversold"] | (rsi <= 43.0)))
+            | ((out["pattern_hammer"] | out["pattern_dragonfly_doji"] | tweezer_bot) & (out["regime_oversold"] | (rsi <= 43.0)))
             | (inv_hammer & out["regime_oversold"])
             | (standard_doji & out["regime_oversold"] & (cmf >= -0.05))
         ).fillna(False)
@@ -335,7 +348,7 @@ class SignalEngine:
         strong_bearish_reversal = (
             evening_star
             | (out["pattern_bearish_engulfing"] & near_overbought & vol_confirmed)
-            | ((out["pattern_shooting_star"] | out["pattern_gravestone_doji"]) & (out["regime_overbought"] | (rsi >= 57.0)))
+            | ((out["pattern_shooting_star"] | out["pattern_gravestone_doji"] | tweezer_top) & (out["regime_overbought"] | (rsi >= 57.0)))
             | (hanging_man & out["regime_overbought"])
             | (standard_doji & out["regime_overbought"] & (cmf <= 0.05))
         ).fillna(False)
@@ -1447,6 +1460,61 @@ class SignalEngine:
 
         return report, trend_boost
 
+    @staticmethod
+    def analyze_swing_structure(
+        closed_df: pd.DataFrame,
+        atr_val: float,
+    ) -> Tuple[str, str, float]:
+        """
+        Dow Theory Institutional Swing Structure Detector (HH/HL, LH/LL, Daralan Üçgen, Yatay Kanal).
+        Returns: (swing_code, swing_structure_tr, trend_score_boost)
+        """
+        if len(closed_df) < 16:
+            return "RANGE", "Yatay Kanal / Dengeli Pivot", 0.0
+
+        tail = closed_df.tail(85).reset_index(drop=True)
+        highs = tail["high"].to_numpy(dtype=float)
+        lows = tail["low"].to_numpy(dtype=float)
+        closes = tail["close"].to_numpy(dtype=float)
+        n = len(tail)
+        w = 3
+        tol = max(0.18 * atr_val, closes[-1] * 0.0018)
+
+        swing_highs: List[float] = []
+        swing_lows: List[float] = []
+        for i in range(w, n - w):
+            if highs[i] >= np.max(highs[i - w : i + w + 1]) - 1e-9:
+                if not swing_highs or abs(highs[i] - swing_highs[-1]) > 0.12 * atr_val:
+                    swing_highs.append(float(highs[i]))
+            if lows[i] <= np.min(lows[i - w : i + w + 1]) + 1e-9:
+                if not swing_lows or abs(lows[i] - swing_lows[-1]) > 0.12 * atr_val:
+                    swing_lows.append(float(lows[i]))
+
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            # Fallback to 2-half comparison
+            mid = n // 2
+            h1, h2 = float(np.max(highs[:mid])), float(np.max(highs[mid:]))
+            l1, l2 = float(np.min(lows[:mid])), float(np.min(lows[mid:]))
+        else:
+            h1, h2 = swing_highs[-2], swing_highs[-1]
+            l1, l2 = swing_lows[-2], swing_lows[-1]
+
+        last_c = float(closes[-1])
+        hh = (h2 > h1 + tol) or (last_c > h2 + tol)
+        lh = (h2 < h1 - tol) and (last_c <= h2 + tol)
+        hl = (l2 > l1 + tol) and (last_c >= l2 - tol)
+        ll = (l2 < l1 - tol) or (last_c < l2 - tol)
+
+        if hh and (hl or l2 >= l1 - tol):
+            return "HH_HL", "Yükselen Tepe & Dip (HH/HL)", 18.0
+        if lh and (ll or h2 <= h1 + tol):
+            return "LH_LL", "Alçalan Tepe & Dip (LH/LL)", -18.0
+        if lh and hl:
+            return "CONVERGING", "Daralan Üçgen / Sıkışma (LH/HL)", 0.0
+        if hh and ll:
+            return "EXPANDING", "Genişleyen Dalga / Volatil Yapı", 0.0
+        return "RANGE", "Yatay Kanal / Dengeli Pivot", 0.0
+
     def generate_forecast(
         self,
         df: pd.DataFrame,
@@ -1515,21 +1583,26 @@ class SignalEngine:
         notes: List[str] = []
 
         # ==================================================================
-        # LAYER 1: TREND STRUCTURE & ZERO-LAG KALMAN FILTER (-100 to +100)
+        # LAYER 1: TREND STRUCTURE, DOW SWING SEQUENCE & ZERO-LAG KALMAN (-100 to +100)
         # ==================================================================
-        t_score = 0.0
+        swing_code, swing_structure_tr, swing_boost = self.analyze_swing_structure(closed_df, atr_val)
+        candle_anatomy_tr = CandlestickPatternDetector.summarize_candle_anatomy(df)
+
+        t_score = swing_boost
         if live_close > ema20 > ema50:
-            t_score += 50.0
-            trend_name_tr = "Yükselen Trend (Fiyat > EMA20 > EMA50)"
+            t_score += 46.0
+            trend_name_tr = f"Yükselen Trend (Fiyat > EMA20 > EMA50 | {swing_structure_tr})"
         elif live_close < ema20 < ema50:
-            t_score -= 50.0
-            trend_name_tr = "Düşen Trend (Fiyat < EMA20 < EMA50)"
+            t_score -= 46.0
+            trend_name_tr = f"Düşen Trend (Fiyat < EMA20 < EMA50 | {swing_structure_tr})"
+        elif chop_val >= 58.5 and adx_val < 20.0:
+            trend_name_tr = f"Yatay / Sıkışma Kanalı ({swing_structure_tr})"
         elif live_close > ema20:
-            t_score += 22.0
-            trend_name_tr = "Kısa Vadeli Toparlanma (Fiyat > EMA20)"
+            t_score += 20.0
+            trend_name_tr = f"Kısa Vadeli Toparlanma (Fiyat > EMA20 | {swing_structure_tr})"
         else:
-            t_score -= 22.0
-            trend_name_tr = "Kısa Vadeli Zayıflama (Fiyat < EMA20)"
+            t_score -= 20.0
+            trend_name_tr = f"Kısa Vadeli Zayıflama (Fiyat < EMA20 | {swing_structure_tr})"
 
         # Zero-Lag Kalman Filter confirmation
         if live_close >= kalman_price and kalman_slope >= 0:
@@ -1537,13 +1610,13 @@ class SignalEngine:
         elif live_close < kalman_price and kalman_slope < 0:
             t_score -= 12.0
 
-        t_score += 13.0 if live_close > ema200 else -13.0
+        t_score += 12.0 if live_close > ema200 else -12.0
 
         if st_dir == 1:
-            t_score += 25.0
+            t_score += 22.0
             supertrend_status_tr = "POZİTİF (SuperTrend Alım Yönünde)"
         else:
-            t_score -= 25.0
+            t_score -= 22.0
             supertrend_status_tr = "NEGATİF (SuperTrend Satış Yönünde)"
 
         t_score = float(np.clip(t_score, -100.0, 100.0))
@@ -1835,7 +1908,35 @@ class SignalEngine:
         if chop_val >= 61.8 and 0.46 <= hurst_val <= 0.54:
             composite *= 0.85
 
+        # Structural Trend & Regime Integrity Filter (prevents counter-trend oscillator bounces from flipping trend label)
+        has_bull_break = (
+            sr_action_type in ("BULL_SR_BREAKOUT", "BULL_SFP", "BULL_RETEST")
+            or (trendlines is not None and trendlines.breakout_status == "BULL_BREAKOUT")
+            or bool(smc_events and smc_events[-1].event_type in ("BULL_BOS", "BULL_CHOCH"))
+        )
+        has_bear_break = (
+            sr_action_type in ("BEAR_SR_BREAKDOWN", "BEAR_SFP", "BEAR_RETEST")
+            or (trendlines is not None and trendlines.breakout_status == "BEAR_BREAKDOWN")
+            or bool(smc_events and smc_events[-1].event_type in ("BEAR_BOS", "BEAR_CHOCH"))
+        )
+        if t_score <= -35.0 and live_close < ema50 and not has_bull_break and composite > 12.0:
+            composite = min(composite, 12.0)
+        elif t_score >= 35.0 and live_close > ema50 and not has_bear_break and composite < -12.0:
+            composite = max(composite, -12.0)
+        elif chop_val >= 59.5 and adx_val < 20.0 and not has_bull_break and not has_bear_break:
+            composite *= 0.68
+
         composite = float(np.clip(composite, -100.0, 100.0))
+
+        # Canonical Trend State Classification: UPTREND, DOWNTREND, SIDEWAYS
+        if chop_val >= 59.0 and adx_val < 19.5 and abs(composite) < 22.0 and not has_bull_break and not has_bear_break:
+            trend_state = "SIDEWAYS"
+        elif composite >= 15.0 and (t_score >= 0.0 or has_bull_break or live_close >= ema20):
+            trend_state = "UPTREND"
+        elif composite <= -15.0 and (t_score <= 0.0 or has_bear_break or live_close <= ema20):
+            trend_state = "DOWNTREND"
+        else:
+            trend_state = "SIDEWAYS"
 
         active_layers = [t_score, mf_score, m_score, s_score, p_score] + ([macro_score] if has_macro else [])
         layer_arr = np.array(active_layers)
@@ -1851,21 +1952,51 @@ class SignalEngine:
         # Historical Path-Dependent & Fee-Adjusted Signal Backtest Validation
         bt_stats = self.backtest_reversal_signals(closed_df, horizon=5)
 
-        if composite >= 42.0:
-            verdict_tr = "GÜÇLÜ POZİTİF EĞİLİM (YUKARI YÖNLÜ OLASILIK ÜSTÜNLÜĞÜ)"
-        elif composite >= 15.0:
-            verdict_tr = "POZİTİF / YUKARI YÖNLÜ TEKNİK GÖRÜNÜM"
-        elif composite <= -42.0:
-            verdict_tr = "GÜÇLÜ NEGATİF EĞİLİM (AŞAĞI YÖNLÜ BASKI ÜSTÜNLÜĞÜ)"
-        elif composite <= -15.0:
-            verdict_tr = "NEGATİF / ZAYIF TEKNİK GÖRÜNÜM (SATIŞ BASKILI)"
+        if trend_state == "UPTREND":
+            verdict_tr = (
+                "GÜÇLÜ YÜKSELEN TREND (ALICI ÜSTÜNLÜĞÜ)"
+                if composite >= 42.0
+                else "YÜKSELEN TREND / POZİTİF YAPI"
+            )
+        elif trend_state == "DOWNTREND":
+            verdict_tr = (
+                "GÜÇLÜ DÜŞEN TREND (SATICI ÜSTÜNLÜĞÜ)"
+                if composite <= -42.0
+                else "DÜŞEN TREND / SATIŞ BASKILI YAPI"
+            )
         else:
-            verdict_tr = "YATAY / DENGE ARAYIŞI (KARARSIZ BÖLGE)"
+            if composite >= 15.0:
+                verdict_tr = "YATAY / DÜZELTME İÇİNDE YUKARI TEPKİ ARAYIŞI"
+            elif composite <= -15.0:
+                verdict_tr = "YATAY / DÜZELTME İÇİNDE AŞAĞI BASKI"
+            else:
+                verdict_tr = "YATAY TREND / KARARSIZ DENGE KANALI"
 
         p_fmt = ",.4f" if live_close < 10.0 else ",.2f"
         sup_str = f"{format(nearest_sup, p_fmt)} USDT"
         res_str = f"{format(nearest_res, p_fmt)} USDT"
         poc_str = f"{format(poc_price, p_fmt)} USDT"
+
+        # Plain-Language Beginner Roadmap (Zero Jargon, Strict YTD)
+        sup_kind = "güçlü destek" if (supports and supports[0].is_strong) else "ara destek"
+        res_kind = "güçlü direnç" if (resistances and resistances[0].is_strong) else "ara direnç"
+        if trend_state == "UPTREND":
+            plain_guidance_tr = (
+                f"Fiyat {swing_structure_tr} yapısı ve alıcı üstünlüğüyle yükselen trendde ilerliyor. "
+                f"Aşağıda {sup_str} ({sup_kind}) korundukça yukarıda {res_str} ({res_kind}) bölgesi izlenir; "
+                f"bu tavan hacimli aşılırsa yükseliş ivme kazanır (YTD)."
+            )
+        elif trend_state == "DOWNTREND":
+            plain_guidance_tr = (
+                f"Fiyat {swing_structure_tr} yapısı ve satıcı baskısıyla düşen trendde seyrediyor. "
+                f"Yukarıda {res_str} ({res_kind}) ve {format(ema20, p_fmt)} ortalaması aşılmadıkça baskı sürer; "
+                f"aşağıda {sup_str} ({sup_kind}) kırılırsa düşüş hızlanabilir (YTD)."
+            )
+        else:
+            plain_guidance_tr = (
+                f"Fiyat net bir yön seçmeden {sup_str} ({sup_kind}) ile {res_str} ({res_kind}) arasında yatay dengeleniyor. "
+                f"Ara bölgede acele edilmemeli; {res_str} üstü mum kapanışı yükselişi, {sup_str} altı kapanış ise düşüşü başlatır (YTD)."
+            )
 
         bull_trigger = max(ema20, live_close) if live_close < ema20 else live_close
         bull_tp1 = min(nearest_res, live_close + 1.15 * atr_val) if nearest_res > live_close * 1.003 else (live_close + 1.15 * atr_val)
@@ -2257,6 +2388,10 @@ class SignalEngine:
             sr_breakout_guide_tr=sr_breakout_guide_tr,
             leverage_squeeze_status_tr=futures_setup.leverage_squeeze_status_tr if futures_setup else "Normal Kaldıraç Dengesi",
             trendlines=trendlines,
+            trend_state=trend_state,
+            swing_structure_tr=swing_structure_tr,
+            candle_anatomy_tr=candle_anatomy_tr,
+            plain_guidance_tr=plain_guidance_tr,
         )
 
     @staticmethod
@@ -2346,33 +2481,53 @@ class SignalEngine:
                 f"Yön belirsizliği var (Genel Puan: {composite:+.0f}/100); alıcı ve satıcılar dengede olduğu için vadeli işlemde stop olma riski yüksek."
             )
 
-        # Module 5: Perpetual Futures Short Squeeze / Long Squeeze (Kaldıraç Sıkıştırma) Detection
-        fr_pct = (order_flow.funding_rate_pct or 0.0) if order_flow is not None else 0.0
-        oi_1h = (order_flow.oi_change_1h_pct or 0.0) if order_flow is not None else 0.0
-        oi_24h = (order_flow.oi_change_24h_pct or 0.0) if order_flow is not None else 0.0
-        t_ratio = (order_flow.futures_taker_buy_sell_ratio or 1.0) if order_flow is not None else 1.0
+        # Module 5: Perpetual Futures Short Squeeze / Long Squeeze (Kaldıraç Sıkıştırma) Detection (STRICT REAL DATA ONLY)
+        fr_val = order_flow.funding_rate_pct if order_flow is not None else None
+        oi_1h_val = order_flow.oi_change_1h_pct if order_flow is not None else None
+        oi_24h_val = order_flow.oi_change_24h_pct if order_flow is not None else None
+        t_ratio_val = order_flow.futures_taker_buy_sell_ratio if order_flow is not None else None
+        has_deriv_metrics = any(v is not None for v in (fr_val, oi_1h_val, oi_24h_val, t_ratio_val))
 
-        is_short_squeeze = (
-            (fr_pct <= -0.005 or (oi_1h >= 0.5 and t_ratio >= 1.04))
+        is_short_squeeze = bool(
+            has_deriv_metrics
+            and (
+                (fr_val is not None and fr_val <= -0.005)
+                or (oi_1h_val is not None and t_ratio_val is not None and oi_1h_val >= 0.5 and t_ratio_val >= 1.04)
+            )
             and (cmf_val >= 0.01 or whale_score >= 53.0 or composite >= 12.0)
         )
-        is_long_squeeze = (
-            (fr_pct >= 0.025 or (oi_1h >= 0.5 and t_ratio <= 0.96))
+        is_long_squeeze = bool(
+            has_deriv_metrics
+            and (
+                (fr_val is not None and fr_val >= 0.025)
+                or (oi_1h_val is not None and t_ratio_val is not None and oi_1h_val >= 0.5 and t_ratio_val <= 0.96)
+            )
             and (cmf_val <= -0.01 or whale_score <= 47.0 or composite <= -12.0)
         )
 
+        deriv_parts: List[str] = []
+        if fr_val is not None:
+            deriv_parts.append(f"Fonlama: %{fr_val:+.4f}")
+        if t_ratio_val is not None:
+            deriv_parts.append(f"Taker: {t_ratio_val:.2f}x")
+        if oi_1h_val is not None:
+            deriv_parts.append(f"OI 1S: %{oi_1h_val:+.1f}")
+        deriv_tag = f" ({' | '.join(deriv_parts)})" if deriv_parts else ""
+
         if is_short_squeeze:
             leverage_squeeze_status_tr = (
-                f"🔥 SHORT SQUEEZE (Şort Patlatma) POTANSİYELİ (Fonlama: %{fr_pct:+.4f} | Taker Alım: {t_ratio:.2f}x) — "
+                f"🔥 SHORT SQUEEZE (Şort Patlatma) POTANSİYELİ{deriv_tag} — "
                 f"Direnç üstündeki açık Short pozisyonlar yukarı kırılımı hızlandırabilir!"
             )
         elif is_long_squeeze:
             leverage_squeeze_status_tr = (
-                f"⚠️ LONG SQUEEZE (Long Tasfiye) RİSKİ (Fonlama: %{fr_pct:+.4f} | Taker Oranı: {t_ratio:.2f}x) — "
+                f"⚠️ LONG SQUEEZE (Long Tasfiye) RİSKİ{deriv_tag} — "
                 f"Destek altındaki kalabalık Long stopları sert satış iğnesi tetikleyebilir!"
             )
+        elif has_deriv_metrics:
+            leverage_squeeze_status_tr = f"⚖️ Dengeli Kaldıraç Yapısı{deriv_tag}"
         else:
-            leverage_squeeze_status_tr = f"⚖️ Dengeli Kaldıraç Yapısı (Fonlama: %{fr_pct:+.4f} | Taker: {t_ratio:.2f}x)"
+            leverage_squeeze_status_tr = "📊 Spot & Teknik Yapı Baz Alındı (Anlık Türev Fonlama Verisi Yok)"
 
         # 2. Support / Resistance Geometry, Entry Mode, Stop-Hunt Protected Stop & Staged TP1/TP2/TP3
         sup_safe = nearest_sup if (nearest_sup and nearest_sup < live_close) else (live_close - 1.3 * atr_safe)
@@ -2606,13 +2761,15 @@ class SignalEngine:
                 else:
                     conf_pts += 3.0
 
-                # Open Interest (OI) Change & Funding Rate Crowd Filter
-                oi_1h = order_flow.oi_change_1h_pct or 0.0
-                oi_24h = order_flow.oi_change_24h_pct or 0.0
-                fr_pct = order_flow.funding_rate_pct or 0.0
-                if abs(oi_1h) > 0.4 or abs(oi_24h) > 1.5:
-                    fut_notes.append(f"OI Değişimi (1S: {oi_1h:+.1f}% | 24S: {oi_24h:+.1f}%)")
-                    conf_pts += 3.0
+                # Open Interest (OI) Change & Funding Rate Crowd Filter (Real Data Only)
+                if oi_1h_val is not None or oi_24h_val is not None:
+                    oi_parts = []
+                    if oi_1h_val is not None:
+                        oi_parts.append(f"1S: {oi_1h_val:+.1f}%")
+                    if oi_24h_val is not None:
+                        oi_parts.append(f"24S: {oi_24h_val:+.1f}%")
+                    fut_notes.append(f"OI Değişimi ({' | '.join(oi_parts)})")
+                    conf_pts += 3.0 if (abs(oi_1h_val or 0.0) > 0.4 or abs(oi_24h_val or 0.0) > 1.5) else 2.0
                 else:
                     conf_pts += 2.0
 
@@ -2623,13 +2780,15 @@ class SignalEngine:
                 elif is_short and is_long_squeeze:
                     conf_pts += 4.5
                     positives.append(leverage_squeeze_status_tr)
-                elif is_long and fr_pct > 0.035:
-                    warnings.append(f"Fonlama oranı yüksek (+%{fr_pct:.4f}); aşırı kalabalık Long kaynaklı iğne riski var.")
-                elif is_short and fr_pct < -0.025:
-                    warnings.append(f"Fonlama oranı negatif (%{fr_pct:.4f}); Short Squeeze (yukarı patlatma) riskine dikkat.")
-                else:
+                elif fr_val is not None and is_long and fr_val > 0.035:
+                    warnings.append(f"Fonlama oranı yüksek (+%{fr_val:.4f}); aşırı kalabalık Long kaynaklı iğne riski var.")
+                elif fr_val is not None and is_short and fr_val < -0.025:
+                    warnings.append(f"Fonlama oranı negatif (%{fr_val:.4f}); Short Squeeze (yukarı patlatma) riskine dikkat.")
+                elif fr_val is not None:
                     conf_pts += 3.0
-                    fut_notes.append(f"Fonlama (%{fr_pct:+.4f}) aşırı şişkin değil")
+                    fut_notes.append(f"Fonlama (%{fr_val:+.4f}) dengeli")
+                else:
+                    conf_pts += 2.5
             else:
                 conf_pts += 7.5
 

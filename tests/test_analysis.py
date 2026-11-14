@@ -75,6 +75,16 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         self.assertTrue(bool(pat_df.loc[3, "pattern_doji"]))
         self.assertTrue(bool(pat_df.loc[5, "pattern_bearish_engulfing"]))
         self.assertTrue(bool(pat_df.loc[6, "pattern_hammer"]))
+        for new_pat_col in (
+            "pattern_tweezer_bottom",
+            "pattern_tweezer_top",
+            "pattern_bullish_marubozu",
+            "pattern_bearish_marubozu",
+        ):
+            self.assertIn(new_pat_col, pat_df.columns)
+
+        anat_str = CandlestickPatternDetector.summarize_candle_anatomy(pat_df)
+        self.assertTrue(len(anat_str) > 0)
 
         # Verify unclosed candle guard suppressed the forming Doji at index 7
         self.assertFalse(bool(pat_df.loc[7, "pattern_doji"]))
@@ -153,6 +163,7 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
             build_futures_radar_inline_keyboard,
             build_futures_setup_inline_keyboard,
             build_main_reply_keyboard,
+            build_watchlist_manage_inline_keyboard,
             format_forecast_telegram_html,
             format_futures_radar_scan_telegram_html,
             format_futures_setup_telegram_html,
@@ -164,6 +175,18 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
 
         # Default timeframe in config must be 4h
         self.assertEqual(self.config.exchange.timeframe, "4h")
+
+        # v10.0 Structural Trend State, Swing Structure, Candle Anatomy & Plain Roadmap (YTD)
+        self.assertIn(fc.trend_state, ("UPTREND", "DOWNTREND", "SIDEWAYS"))
+        self.assertTrue(len(fc.swing_structure_tr) > 0)
+        self.assertTrue(len(fc.candle_anatomy_tr) > 0)
+        self.assertTrue(len(fc.plain_guidance_tr) > 0)
+        self.assertIn("YTD", fc.plain_guidance_tr)
+
+        # Ensure no fake 0.0000 funding rate is fabricated when order_flow has None derivative metrics
+        no_deriv_flow = OrderFlowIntel(symbol="ETH/USDT", exchange="BINANCE")
+        fc_no_deriv = self.signals.generate_forecast(df, order_flow=no_deriv_flow, symbol="ETH/USDT")
+        self.assertNotIn("0.0000", fc_no_deriv.futures_setup.futures_tech_summary_tr)
 
         # v8.4 Support vs Strong Support & Resistance vs Strong Resistance verification
         self.assertGreaterEqual(len(fc.support_levels), 1)
@@ -216,9 +239,10 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
             mtf_scores={"15M": -20.0, "1H": fc.score, "4H": -35.0, "1D": -30.0},
         )
         # Concise summary checks & no Futures TP/Stop in general analysis
-        self.assertLess(len(tg_msg), 1020)
+        self.assertLess(len(tg_msg), 950)
         self.assertIn("DESTEK &amp; DİRENÇ SINIFLANDIRMASI", tg_msg)
         self.assertIn("PARA AKIŞI &amp; MIKNATIS", tg_msg)
+        self.assertIn("SADE YOL HARİTASI (YTD)", tg_msg)
         self.assertNotIn("TP1:", tg_msg)
         self.assertNotIn("Zarar-Kes (Stop):", tg_msg)
 
@@ -246,9 +270,14 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         self.assertIn("İŞLEME UYGUN VADELİ KURULUMLAR", radar_tg_msg)
         self.assertIn("RİSKLİ / İŞLEM TAVSİYE EDİLMEYENLER", radar_tg_msg)
 
-        kb_an = build_analysis_inline_keyboard("ETH/USDT")
+        kb_an = build_analysis_inline_keyboard("ETH/USDT", in_watchlist=True)
         self.assertEqual(len(kb_an["inline_keyboard"]), 5)
         self.assertIn(":4H", kb_an["inline_keyboard"][1][0]["callback_data"])
+        self.assertEqual(kb_an["inline_keyboard"][4][0]["callback_data"], "wl_del:ETH/USDT:4H")
+
+        kb_an_add = build_analysis_inline_keyboard("PEPE/USDT", in_watchlist=False)
+        self.assertEqual(kb_an_add["inline_keyboard"][4][0]["callback_data"], "wl_add:PEPE/USDT:4H")
+
         kb_fut = build_futures_setup_inline_keyboard("ETH/USDT")
         self.assertEqual(len(kb_fut["inline_keyboard"]), 4)
         self.assertIn("fut_chart:ETH/USDT:4H", kb_fut["inline_keyboard"][1][1]["callback_data"])
@@ -258,7 +287,11 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         self.assertEqual(len(kb_main["keyboard"]), 2)
         self.assertEqual(kb_main["keyboard"][1][0]["text"], "🚀 Tümünü Tara (4H)")
         kb_coins = build_coin_list_inline_keyboard(["BTC/USDT", "ETH/USDT", "ONDO/USDT"])
-        self.assertGreaterEqual(len(kb_coins["inline_keyboard"]), 3)
+        self.assertGreaterEqual(len(kb_coins["inline_keyboard"]), 4)
+        kb_wm_add = build_watchlist_manage_inline_keyboard(["BTC/USDT", "ETH/USDT"], mode="add", timeframe="4H")
+        self.assertTrue(any("wl_qadd:" in b["callback_data"] for r in kb_wm_add["inline_keyboard"] for b in r))
+        kb_wm_del = build_watchlist_manage_inline_keyboard(["BTC/USDT", "ETH/USDT"], mode="del", timeframe="4H")
+        self.assertTrue(any("wl_qdel:" in b["callback_data"] for r in kb_wm_del["inline_keyboard"] for b in r))
 
         liq_msg = format_liquidation_magnet_telegram_html("ETH/USDT", {"4H": fc}, curr_p)
         self.assertIn("MIKNATIS FİYAT &amp; LİKİDASYON HARİTASI", liq_msg)

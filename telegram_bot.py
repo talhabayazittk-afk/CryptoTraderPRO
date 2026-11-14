@@ -44,6 +44,7 @@ from src.signals import MarketForecast, SignalEngine
 import src.telegram_notifier as _tg_notifier
 from src.telegram_notifier import (
     PID_FILE,
+    POPULAR_QUICK_COINS,
     add_price_alarm,
     answer_callback_query,
     build_alarm_radar_inline_keyboard,
@@ -53,6 +54,7 @@ from src.telegram_notifier import (
     build_futures_setup_inline_keyboard,
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
+    build_watchlist_manage_inline_keyboard,
     edit_telegram_message,
     edit_telegram_photo_message,
     format_forecast_telegram_html,
@@ -167,7 +169,8 @@ def _load_shared_watchlist() -> List[str]:
 
 def _save_shared_watchlist(items: List[str]) -> None:
     try:
-        WATCHLIST_FILE.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+        clean = list(dict.fromkeys([str(x).strip().upper() for x in items if str(x).strip()]))
+        WATCHLIST_FILE.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -189,6 +192,29 @@ _CACHE_LOCK = threading.Lock()
 _BUNDLE_CACHE: Dict[str, Tuple[float, Dict[str, pd.DataFrame], Dict[str, MarketForecast], Dict[str, float], float]] = {}
 _SCAN_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CACHE_TTL_SEC = 45.0
+
+
+def _invalidate_scan_cache() -> None:
+    """Clears multi-coin scan cache whenever the user adds or removes a coin."""
+    with _CACHE_LOCK:
+        _SCAN_CACHE.clear()
+
+
+def _validate_coin_on_exchange(sym: str) -> bool:
+    """Verifies that a symbol exists on the live exchange before adding to watchlist."""
+    sym_u = _normalize_symbol(sym)
+    if sym_u in POPULAR_QUICK_COINS:
+        return True
+    ex_choice = str(load_telegram_state().get("primary_exchange", "binance")).lower()
+    with _CACHE_LOCK:
+        if f"{ex_choice}:{sym_u}" in _BUNDLE_CACHE:
+            return True
+    try:
+        cfg = AnalysisConfig(exchange=ExchangeConfig(primary_exchange=ex_choice, symbol=sym_u, timeframe="15m", limit=5))
+        df_v, _ = CryptoDataFetcher(cfg.exchange).fetch_ohlcv(allow_synthetic_fallback=False)
+        return not df_v.empty
+    except Exception:
+        return False
 
 
 def _compute_full_coin_bundle(
@@ -382,9 +408,10 @@ def _analyze_single_coin_for_scan(
             force_refresh=False,
         )
         p_fmt = ",.4f" if current_price < 10.0 else ",.2f"
-        if fc.score >= 15:
+        t_st = getattr(fc, "trend_state", "")
+        if t_st == "UPTREND" or (not t_st and fc.score >= 15):
             trend_lbl = f"📈 Yükselen ({fc.score:+.0f})"
-        elif fc.score <= -15:
+        elif t_st == "DOWNTREND" or (not t_st and fc.score <= -15):
             trend_lbl = f"📉 Düşen ({fc.score:+.0f})"
         else:
             trend_lbl = f"⚖️ Yatay ({fc.score:+.0f})"
@@ -435,7 +462,7 @@ def _scan_watchlist_parallel(
     force_refresh: bool = False,
 ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
     """
-    Scans up to 10 watchlist coins IN PARALLEL using ThreadPoolExecutor,
+    Scans up to 15 watchlist coins IN PARALLEL using ThreadPoolExecutor,
     incorporating BTC macro context, caches raw results for 45s so filter/market
     switches are instant, and returns (html_text, inline_keyboard, raw_results).
     """
@@ -450,7 +477,9 @@ def _scan_watchlist_parallel(
                 results = list(cached_s[1])
 
     if results is None:
-        symbols_to_scan = list(dict.fromkeys(_load_shared_watchlist() + DEFAULT_WATCHLIST))[:10]
+        symbols_to_scan = _load_shared_watchlist()[:15]
+        if not symbols_to_scan:
+            symbols_to_scan = list(DEFAULT_WATCHLIST)
 
         # Warm up 4-TF BTC reference bundle once before parallel coin workers run
         try:
@@ -552,20 +581,19 @@ def _build_help_html(chat_id: str) -> str:
         "• <code>/vadeli ONDO 4h</code> — Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı + Vadeli Grafik\n"
         "• <code>/vadelitara 4h</code> — Tüm Coinleri Tarar, Güvenli Vadeli Kurulumları Ayırır\n\n"
         "📲 <b>Temel Sorgu &amp; Grafik Komutları (Varsayılan: 4H):</b>\n"
-        "• <code>ONDO</code> veya <code>ONDO 4h</code> — Grafik + Kısa &amp; Öz Analiz (Güçlü vs Sıradan Destek/Direnç)\n"
+        "• <code>ONDO</code> veya <code>ONDO 4h</code> — Grafik + Kısa &amp; Öz Yapısal Analiz\n"
         "• <code>/grafik ONDO 4h</code> — Destek/Direnç Sınıflandırmalı Grafik Görseli\n"
         "• <code>/miknatis ONDO</code> — 15M/1H/4H/1D Mıknatıs (POC) &amp; Likidasyon Haritası\n"
         "• <code>/kasa ONDO 1000</code> — Stop Mesafesine Göre Kasa &amp; Risk Hesaplayıcı\n\n"
-        "🚀 <b>Tarama &amp; Küresel Piyasa Komutları:</b>\n"
-        "• <code>/tara 4h</code> — İzleme Listesini 4H Diliminde Paralel Tarar\n"
-        "• <code>/firsat 4h</code> — Sadece Güçlü Kurulum &amp; Balina Fırsatlarını Filtreler\n"
-        "• <code>/piyasa</code> veya <code>/nakit</code> — Küresel Para Giriş/Çıkışı &amp; Seans Özeti\n\n"
-        "⏰ <b>Alarm, Radar &amp; Liste Yönetimi:</b>\n"
+        "🪙 <b>Telegram Üzerinden Coin Ekleme &amp; Çıkarma:</b>\n"
+        "• <code>/ekle PEPE RENDER</code> — Borsada doğrulayarak izleme listenize yeni coin(ler) ekler\n"
+        "• <code>/sil ENA</code> veya <code>/cikar ENA</code> — Coini izleme listenizden çıkarır\n"
+        "• <code>/liste</code> — Tıklanabilir Coin Seçim &amp; 1-Tıkla Coin Ekle/Çıkar Menüsü (4H)\n\n"
+        "⏰ <b>Alarm &amp; 7/24 Otomatik Radar:</b>\n"
         "• <code>/alarm ONDO 0.3620</code> — Hedef Fiyata Anlık Bildirim Alarmı Kurar\n"
         "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n"
-        "• <code>/liste</code> — Tıklanabilir Coin Seçim Menüsü (4H)\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>"
+        f"🆔 <b>Chat ID:</b> <code>{chat_id}</code> (Yatırım tavsiyesi değildir - YTD)"
     )
 
 
@@ -1096,6 +1124,106 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
                 send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
         else:
             send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
+
+    # 14. Watchlist Add / Remove from Analysis Card: wl_add:SYMBOL:TF or wl_del:SYMBOL:TF
+    elif action in ("wl_add", "wl_del") and len(parts) >= 2:
+        sym = _normalize_symbol(parts[1])
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        wl = _load_shared_watchlist()
+        if action == "wl_add":
+            if sym not in wl:
+                wl.append(sym)
+                _save_shared_watchlist(wl)
+                _invalidate_scan_cache()
+            answer_callback_query(bot_token, cq_id, f"✅ {sym} izleme listesine eklendi!")
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"✅ <b>{sym}</b> aktif izleme listenize eklendi! Artık tüm taramalarda ve radarlarda takip edilecek.",
+                reply_markup=build_coin_list_inline_keyboard(wl, tf),
+            )
+        else:
+            if len(wl) <= 1 and sym in wl:
+                answer_callback_query(bot_token, cq_id, "⚠️ Listede en az 1 coin kalmalıdır!")
+                return
+            wl = [x for x in wl if x != sym]
+            _save_shared_watchlist(wl)
+            _invalidate_scan_cache()
+            answer_callback_query(bot_token, cq_id, f"🗑️ {sym} izleme listesinden çıkarıldı.")
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🗑️ <b>{sym}</b> izleme listenizden çıkarıldı.",
+                reply_markup=build_coin_list_inline_keyboard(wl, tf),
+            )
+
+    # 15. Interactive Watchlist Management Menu: wl_menu:MODE:TF
+    elif action == "wl_menu":
+        mode = parts[1] if len(parts) >= 2 else "add"
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        wl = _load_shared_watchlist()
+        if mode == "add":
+            answer_callback_query(bot_token, cq_id, "➕ Hızlı Coin Ekleme Menüsü")
+            html_wm = (
+                f"➕ <b>HIZLI COİN EKLEME PANELİ ({len(wl)} Aktif Coin)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• Aşağıdaki popüler coinlerden birine dokunarak <b>tek tıkla</b> izleme listenize ekleyebilirsiniz.\n"
+                "• Listede olmayan <b>herhangi bir coini</b> eklemek için sohbete doğrudan:\n"
+                "<code>/ekle SEMBOL</code> (Örn: <code>/ekle PEPE</code> veya <code>/ekle RENDER FET</code>) yazmanız yeterlidir."
+            )
+        else:
+            answer_callback_query(bot_token, cq_id, "➖ Coin Çıkarma Menüsü")
+            html_wm = (
+                f"➖ <b>COİN ÇIKARMA PANELİ ({len(wl)} Aktif Coin)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• İzleme listenizden çıkarmak istediğiniz coinin üzerindeki <b>🗑️ butonuna</b> dokunun.\n"
+                "• Komutla çıkarmak için: <code>/cikar SEMBOL</code> yazabilirsiniz."
+            )
+        kb_wm = build_watchlist_manage_inline_keyboard(wl, mode=mode, timeframe=tf)
+        if not is_photo_msg and msg_id:
+            if not edit_telegram_message(bot_token, chat_id, msg_id, html_wm, reply_markup=kb_wm):
+                send_telegram_message(bot_token, chat_id, html_wm, reply_markup=kb_wm)
+        else:
+            send_telegram_message(bot_token, chat_id, html_wm, reply_markup=kb_wm)
+
+    # 16. Quick 1-Tap Add/Remove inside Watchlist Management Menu: wl_qadd:SYMBOL:TF or wl_qdel:SYMBOL:TF
+    elif action in ("wl_qadd", "wl_qdel") and len(parts) >= 2:
+        sym = _normalize_symbol(parts[1])
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        wl = _load_shared_watchlist()
+        if action == "wl_qadd":
+            if sym not in wl:
+                wl.append(sym)
+                _save_shared_watchlist(wl)
+                _invalidate_scan_cache()
+            answer_callback_query(bot_token, cq_id, f"✅ {sym} listeye eklendi!")
+            mode = "add"
+            status_line = f"✅ <b>{sym}</b> başarıyla izleme listenize eklendi!"
+        else:
+            if len(wl) <= 1 and sym in wl:
+                answer_callback_query(bot_token, cq_id, "⚠️ Listede en az 1 coin kalmalıdır!")
+                return
+            wl = [x for x in wl if x != sym]
+            _save_shared_watchlist(wl)
+            _invalidate_scan_cache()
+            answer_callback_query(bot_token, cq_id, f"🗑️ {sym} listeden çıkarıldı!")
+            mode = "del"
+            status_line = f"🗑️ <b>{sym}</b> izleme listenizden çıkarıldı."
+
+        wl_str = ", ".join(c.replace("/USDT", "") for c in wl)
+        html_wm = (
+            f"{status_line}\n"
+            f"📋 <b>Güncel Liste ({len(wl)} Coin):</b> <code>{wl_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>İşleme devam edebilir veya 🔙 Coin Listesine Dön butonuna dokunabilirsiniz:</i>"
+        )
+        kb_wm = build_watchlist_manage_inline_keyboard(wl, mode=mode, timeframe=tf)
+        if not is_photo_msg and msg_id:
+            if not edit_telegram_message(bot_token, chat_id, msg_id, html_wm, reply_markup=kb_wm):
+                send_telegram_message(bot_token, chat_id, html_wm, reply_markup=kb_wm)
+        else:
+            send_telegram_message(bot_token, chat_id, html_wm, reply_markup=kb_wm)
+
     else:
         answer_callback_query(bot_token, cq_id, "✅ İşlem alındı.")
 
@@ -1356,33 +1484,95 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(
                 bot_token,
                 chat_id,
-                "🪙 <b>AKTİF İZLEME LİSTENİZ (4H)</b>\n<i>Grafikli özet analizini açmak istediğiniz coinin butonuna dokunun:</i>",
+                "🪙 <b>AKTİF İZLEME LİSTENİZ (4H)</b>\n<i>Grafikli özet analizini açmak istediğiniz coinin butonuna dokunun veya alttan coin ekleyip çıkarın:</i>",
                 reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
-        elif cmd == "/ekle" and len(parts) >= 2:
-            sym = _normalize_symbol(parts[1])
+        elif cmd in ("/ekle", "/add", "ekle"):
             wl = _load_shared_watchlist()
-            if sym not in wl:
-                wl.append(sym)
-                _save_shared_watchlist(wl)
-            send_telegram_message(
-                bot_token,
-                chat_id,
-                f"✅ <b>{sym}</b> izleme listenize eklendi!",
-                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
-            )
+            if len(parts) < 2:
+                html_wm = (
+                    f"➕ <b>HIZLI COİN EKLEME PANELİ ({len(wl)} Aktif Coin)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "• Aşağıdaki popüler coinlerden birine dokunarak <b>tek tıkla</b> izleme listenize ekleyebilirsiniz.\n"
+                    "• Listede olmayan <b>herhangi bir coini</b> eklemek için sohbete doğrudan:\n"
+                    "<code>/ekle SEMBOL</code> (Örn: <code>/ekle PEPE</code> veya <code>/ekle RENDER FET</code>) yazmanız yeterlidir."
+                )
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    html_wm,
+                    reply_markup=build_watchlist_manage_inline_keyboard(wl, mode="add", timeframe="4H"),
+                )
+            else:
+                added_syms = []
+                already_syms = []
+                invalid_syms = []
+                raw_coins = [c.strip() for p in parts[1:] for c in p.split(",") if c.strip()]
+                for raw_c in raw_coins:
+                    sym = _normalize_symbol(raw_c)
+                    if sym in wl:
+                        already_syms.append(sym)
+                    elif _validate_coin_on_exchange(sym):
+                        wl.append(sym)
+                        added_syms.append(sym)
+                    else:
+                        invalid_syms.append(sym)
 
-        elif cmd == "/cikar" and len(parts) >= 2:
-            sym = _normalize_symbol(parts[1])
-            wl = [x for x in _load_shared_watchlist() if x != sym]
-            _save_shared_watchlist(wl)
-            send_telegram_message(
-                bot_token,
-                chat_id,
-                f"🗑️ <b>{sym}</b> izleme listenizden çıkarıldı.",
-                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
-            )
+                if added_syms:
+                    _save_shared_watchlist(wl)
+                    _invalidate_scan_cache()
+
+                msg_lines = []
+                if added_syms:
+                    msg_lines.append(f"✅ <b>Eklendi:</b> {', '.join(added_syms)} artık tüm tarama ve radarlarda takip edilecek!")
+                if already_syms:
+                    msg_lines.append(f"ℹ️ <b>Zaten Listede:</b> {', '.join(already_syms)}")
+                if invalid_syms:
+                    msg_lines.append(f"⚠️ <b>Borsada Doğrulanamadı:</b> {', '.join(invalid_syms)} (Sembol adını kontrol edin)")
+
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    "\n".join(msg_lines) if msg_lines else "ℹ️ Eklenecek sembol belirtilmedi.",
+                    reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
+                )
+
+        elif cmd in ("/cikar", "/çıkar", "/sil", "cikar", "çıkar", "sil"):
+            wl = _load_shared_watchlist()
+            if len(parts) < 2:
+                html_wm = (
+                    f"➖ <b>COİN ÇIKARMA PANELİ ({len(wl)} Aktif Coin)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "• İzleme listenizden çıkarmak istediğiniz coinin üzerindeki <b>🗑️ butonuna</b> dokunun.\n"
+                    "• Komutla çıkarmak için: <code>/cikar SEMBOL</code> yazabilirsiniz."
+                )
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    html_wm,
+                    reply_markup=build_watchlist_manage_inline_keyboard(wl, mode="del", timeframe="4H"),
+                )
+            else:
+                raw_coins = [c.strip() for p in parts[1:] for c in p.split(",") if c.strip()]
+                removed_syms = []
+                for raw_c in raw_coins:
+                    sym = _normalize_symbol(raw_c)
+                    if sym in wl and len(wl) > 1:
+                        wl = [x for x in wl if x != sym]
+                        removed_syms.append(sym)
+                if removed_syms:
+                    _save_shared_watchlist(wl)
+                    _invalidate_scan_cache()
+                    msg_txt = f"🗑️ <b>Çıkarıldı:</b> {', '.join(removed_syms)} izleme listenizden kaldırıldı."
+                else:
+                    msg_txt = "ℹ️ Belirtilen coin listede bulunamadı veya listede en az 1 coin kalmalıdır."
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    msg_txt,
+                    reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
+                )
 
         elif not cmd.startswith("/") and 2 <= len(parts[0]) <= 12:
             sym = _normalize_symbol(parts[0])

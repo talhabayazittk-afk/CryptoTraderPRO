@@ -127,6 +127,42 @@ PATTERN_INFO_TR: Dict[str, Dict[str, str]] = {
         ),
         "direction": "NÖTR / DÖNÜŞ ADAYI",
     },
+    "Tweezer Bottom": {
+        "tr_name": "Cımbız Dip (İkili Dip Savunması)",
+        "short_tag": "Cımbız Dip (Alım Tepkisi)",
+        "meaning": (
+            "Ardışık iki mumun aynı dip seviyesinden reddedilerek ikinci mumun yeşil kapanmasıdır. "
+            "Destek seviyesinin kurumsal alıcılar tarafından savunulduğunu ve yukarı dönüş başladığını gösterir."
+        ),
+        "direction": "YUKARI (BOĞA)",
+    },
+    "Tweezer Top": {
+        "tr_name": "Cımbız Tepe (İkili Tepe Reddi)",
+        "short_tag": "Cımbız Tepe (Satış Reddi)",
+        "meaning": (
+            "Ardışık iki mumun aynı tepe direncini aşamayıp ikinci mumun kırmızı kapanmasıdır. "
+            "Dirençte güçlü satıcı duvarı olduğunu ve aşağı yönlü düzeltme riskini gösterir."
+        ),
+        "direction": "AŞAĞI (AYI)",
+    },
+    "Bullish Marubozu": {
+        "tr_name": "Boğa Marubozu (Tam Gövdeli Alıcı İvmesi)",
+        "short_tag": "Boğa Marubozu (Güçlü Alım)",
+        "meaning": (
+            "Neredeyse fitilsiz, açılıştan kapanışa kadar alıcıların tam kontrolünde kapanan geniş yeşil mumdur. "
+            "Güçlü kurumsal momentum ve yukarı yönlü trend devamlılığı sinyalidir."
+        ),
+        "direction": "YUKARI (BOĞA)",
+    },
+    "Bearish Marubozu": {
+        "tr_name": "Ayı Marubozu (Tam Gövdeli Satış Baskısı)",
+        "short_tag": "Ayı Marubozu (Güçlü Satış)",
+        "meaning": (
+            "Neredeyse fitilsiz, açılıştan kapanışa kadar satıcıların tam kontrolünde kapanan geniş kırmızı mumdur. "
+            "Sert satış baskısı ve aşağı yönlü momentum devamlılığı sinyalidir."
+        ),
+        "direction": "AŞAĞI (AYI)",
+    },
 }
 
 
@@ -260,7 +296,46 @@ class CandlestickPatternDetector:
         is_shooting_star = (upper_wick_pinbar & uptrend_ctx).fillna(False)
         is_inverted_hammer = (upper_wick_pinbar & (~uptrend_ctx) & downtrend_ctx).fillna(False)
 
-        # 5. Suppress false pattern triggers on an unclosed forming live candle (`is_closed == False`)
+        # 5. TWEEZER BOTTOM / TOP & MARUBOZU IMPULSE CANDLES
+        prev_l = l.shift(1)
+        prev_h = h.shift(1)
+        is_tweezer_bottom = (
+            prev_bearish
+            & curr_bullish
+            & ((l - prev_l).abs() <= 0.08 * ref_range)
+            & ((lower_shadow_ratio >= 0.32) | (lower_shadow.shift(1) / candle_range.shift(1) >= 0.32))
+            & (~is_bullish_engulfing)
+            & (~is_hammer)
+            & meaningful_range
+        ).fillna(False)
+
+        is_tweezer_top = (
+            prev_bullish
+            & curr_bearish
+            & ((h - prev_h).abs() <= 0.08 * ref_range)
+            & ((upper_shadow_ratio >= 0.32) | (upper_shadow.shift(1) / candle_range.shift(1) >= 0.32))
+            & (~is_bearish_engulfing)
+            & (~is_shooting_star)
+            & meaningful_range
+        ).fillna(False)
+
+        is_bullish_marubozu = (
+            curr_bullish
+            & (body_ratio >= 0.84)
+            & (candle_range >= 1.15 * ref_range)
+            & (~is_bullish_engulfing)
+            & (~is_morning_star)
+        ).fillna(False)
+
+        is_bearish_marubozu = (
+            curr_bearish
+            & (body_ratio >= 0.84)
+            & (candle_range >= 1.15 * ref_range)
+            & (~is_bearish_engulfing)
+            & (~is_evening_star)
+        ).fillna(False)
+
+        # 6. Suppress false pattern triggers on an unclosed forming live candle (`is_closed == False`)
         if "is_closed" in out.columns:
             closed_mask = out["is_closed"].fillna(True).astype(bool)
         else:
@@ -276,6 +351,10 @@ class CandlestickPatternDetector:
         out["pattern_inverted_hammer"] = is_inverted_hammer & closed_mask
         out["pattern_shooting_star"] = is_shooting_star & closed_mask
         out["pattern_hanging_man"] = is_hanging_man & closed_mask
+        out["pattern_tweezer_bottom"] = is_tweezer_bottom & closed_mask
+        out["pattern_tweezer_top"] = is_tweezer_top & closed_mask
+        out["pattern_bullish_marubozu"] = is_bullish_marubozu & closed_mask
+        out["pattern_bearish_marubozu"] = is_bearish_marubozu & closed_mask
         out["pattern_doji"] = is_doji & closed_mask
 
         conditions = [
@@ -289,6 +368,10 @@ class CandlestickPatternDetector:
             out["pattern_shooting_star"],
             out["pattern_inverted_hammer"],
             out["pattern_hanging_man"],
+            out["pattern_tweezer_bottom"],
+            out["pattern_tweezer_top"],
+            out["pattern_bullish_marubozu"],
+            out["pattern_bearish_marubozu"],
             out["pattern_doji"],
         ]
         choices = [
@@ -302,6 +385,10 @@ class CandlestickPatternDetector:
             "Shooting Star",
             "Inverted Hammer",
             "Hanging Man",
+            "Tweezer Bottom",
+            "Tweezer Top",
+            "Bullish Marubozu",
+            "Bearish Marubozu",
             "Doji",
         ]
         out["primary_pattern"] = np.select(conditions, choices, default="")
@@ -320,3 +407,63 @@ class CandlestickPatternDetector:
         )
 
         return out
+
+    @staticmethod
+    def summarize_candle_anatomy(df: pd.DataFrame) -> str:
+        """
+        Produces an authentic, concise 1-line Turkish reading of the most recent CLOSED candle(s)
+        combining candlestick pattern recognition, body/wick geometry, and relative volume (RVOL).
+        """
+        if len(df) == 0:
+            return "Veri Yok"
+        if len(df) >= 2 and "is_closed" in df.columns and not bool(df["is_closed"].iloc[-1]):
+            closed_sub = df.iloc[:-1]
+        else:
+            closed_sub = df
+        if len(closed_sub) == 0:
+            closed_sub = df
+
+        row = closed_sub.iloc[-1]
+        o = float(row["open"])
+        h = float(row["high"])
+        l = float(row["low"])
+        c = float(row["close"])
+        rng = max(h - l, 1e-9)
+        body = abs(c - o)
+        body_pct = (body / rng) * 100.0
+        up_wick_pct = ((h - max(o, c)) / rng) * 100.0
+        lo_wick_pct = ((min(o, c) - l) / rng) * 100.0
+        rvol = float(row.get("rvol", 1.0)) if pd.notna(row.get("rvol", 1.0)) else 1.0
+        vol_tag = f"Hacim: {rvol:.1f}x"
+
+        # Check recent 2 closed bars for an active named candlestick pattern
+        rec_2 = closed_sub.tail(2)
+        pat_short = ""
+        for _, r_cand in rec_2.iloc[::-1].iterrows():
+            p_s = str(r_cand.get("pattern_short_tr", "") or "")
+            if p_s:
+                pat_short = p_s
+                break
+
+        if lo_wick_pct >= 42.0 and c >= o:
+            geom = f"🟢 Dip İğneli Alıcı Savunması (Alt İğne: %{lo_wick_pct:.0f})"
+        elif lo_wick_pct >= 45.0:
+            geom = f"🛡️ Uzun Alt Fitilli Alım Tepkisi (Alt İğne: %{lo_wick_pct:.0f})"
+        elif up_wick_pct >= 42.0 and c <= o:
+            geom = f"🔴 Tepe İğneli Satıcı Reddi (Üst İğne: %{up_wick_pct:.0f})"
+        elif up_wick_pct >= 45.0:
+            geom = f"🧱 Uzun Üst Fitilli Satış Baskısı (Üst İğne: %{up_wick_pct:.0f})"
+        elif body_pct >= 68.0 and c > o:
+            geom = f"🟢 Güçlü Alıcı Gövdesi (Gövde: %{body_pct:.0f})"
+        elif body_pct >= 68.0 and c < o:
+            geom = f"🔴 Güçlü Satıcı Gövdesi (Gövde: %{body_pct:.0f})"
+        elif body_pct <= 22.0:
+            geom = f"⚖️ Kararsız / Denge Mumu (Gövde: %{body_pct:.0f})"
+        elif c > o:
+            geom = f"🟢 Pozitif Kapanışlı Mum (Gövde: %{body_pct:.0f})"
+        else:
+            geom = f"🔴 Negatif Kapanışlı Mum (Gövde: %{body_pct:.0f})"
+
+        if pat_short:
+            return f"{pat_short} • {geom} ({vol_tag})"
+        return f"{geom} ({vol_tag})"

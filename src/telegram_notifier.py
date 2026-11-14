@@ -95,7 +95,7 @@ def _default_state() -> Dict[str, Any]:
         "radar_enabled": True,
         "radar_interval_sec": 600,  # 10 minutes
         "auto_session_summary": True,
-        "send_chart_with_analysis": False,
+        "send_chart_with_analysis": True,
         "alarms": [],               # List of {id, symbol, target_price, direction, note, created_at}
         "radar_cooldowns": {},      # symbol -> last_alert_epoch
         "last_session_tag": "",     # Prevents duplicate session summary
@@ -277,7 +277,7 @@ def build_main_reply_keyboard() -> Dict[str, Any]:
                 {"text": "⚡ Vadeli İşlem Radarı"},
             ],
             [
-                {"text": "🚀 Tümünü Tara (1H)"},
+                {"text": "🚀 Tümünü Tara (4H)"},
                 {"text": "🌍 Piyasa & Nakit Özeti"},
                 {"text": "⏰ Alarmlarım & Radar"},
             ],
@@ -287,7 +287,7 @@ def build_main_reply_keyboard() -> Dict[str, Any]:
     }
 
 
-def build_analysis_inline_keyboard(symbol: str, active_tf: str) -> Dict[str, Any]:
+def build_analysis_inline_keyboard(symbol: str, active_tf: str = "4H") -> Dict[str, Any]:
     """
     Builds a rich touch button deck underneath every single-coin analysis message:
       Row 1: [15M] [1H] [4H] [1D] instant timeframe switcher
@@ -327,11 +327,11 @@ def build_analysis_inline_keyboard(symbol: str, active_tf: str) -> Dict[str, Any
     }
 
 
-def build_futures_setup_inline_keyboard(symbol: str, active_tf: str) -> Dict[str, Any]:
+def build_futures_setup_inline_keyboard(symbol: str, active_tf: str = "4H") -> Dict[str, Any]:
     """
     Builds interactive touch buttons underneath the Dedicated Perpetual Futures Setup screen:
       Row 1: [15M] [1H] [4H] [1D] instant timeframe switcher for Futures Setup
-      Row 2: [📊 4 Kart Spot/Genel Analiz] [🖼️ Grafik Gönder] [🧮 Kasa Planı]
+      Row 2: [📊 Genel Analiz] [🖼️ Vadeli Grafik] [🧮 Kasa Planı]
       Row 3: [🔔 Direnç Alarmı (+)] [🔔 Destek Alarmı (-)]
       Row 4: [🔄 Canlı Yenile] [📡 Tüm Vadeli Radarı Tara] [🪙 Coin Seç]
     """
@@ -345,8 +345,8 @@ def build_futures_setup_inline_keyboard(symbol: str, active_tf: str) -> Dict[str
         "inline_keyboard": [
             tf_row,
             [
-                {"text": "📊 4 Kart Genel Analiz", "callback_data": f"an:{symbol}:{tf_up}"},
-                {"text": "🖼️ Grafik Gönder", "callback_data": f"chart:{symbol}:{tf_up}"},
+                {"text": "📊 Genel Analiz", "callback_data": f"an:{symbol}:{tf_up}"},
+                {"text": "🖼️ Vadeli Grafik", "callback_data": f"fut_chart:{symbol}:{tf_up}"},
                 {"text": "🧮 Kasa Planı", "callback_data": f"kasa:{symbol}:{tf_up}"},
             ],
             [
@@ -362,7 +362,7 @@ def build_futures_setup_inline_keyboard(symbol: str, active_tf: str) -> Dict[str
     }
 
 
-def build_futures_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: str = "1H") -> Dict[str, Any]:
+def build_futures_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: str = "4H") -> Dict[str, Any]:
     """
     Builds interactive touch buttons underneath the Multi-Coin Perpetual Futures Radar Scan:
       - Direct buttons for tradeable setups (🟢 LONG / 🔴 SHORT) and other coins to open their Futures Setup
@@ -405,7 +405,7 @@ def build_futures_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: s
     return {"inline_keyboard": kb_rows}
 
 
-def build_coin_list_inline_keyboard(watchlist: List[str], timeframe: str = "1H") -> Dict[str, Any]:
+def build_coin_list_inline_keyboard(watchlist: List[str], timeframe: str = "4H") -> Dict[str, Any]:
     """Builds a 3-column touch grid of coins from the user's watchlist."""
     tf_up = timeframe.upper()
     rows: List[List[Dict[str, str]]] = []
@@ -436,12 +436,12 @@ def build_coin_list_inline_keyboard(watchlist: List[str], timeframe: str = "1H")
 
 def build_screener_inline_keyboard(
     rows: List[Dict[str, Any]],
-    timeframe: str,
+    timeframe: str = "4H",
     only_high_quality: bool = False,
 ) -> Dict[str, Any]:
     """
     Builds interactive touch buttons under the Multi-Coin Screener so the user can:
-      - Tap any ranked coin to open its detailed 4-card analysis immediately
+      - Tap any ranked coin to open its detailed analysis immediately
       - Switch scan timeframe (15M / 1H / 4H / 1D)
       - Toggle between All Coins and High-Quality Setups (/firsat)
     """
@@ -479,7 +479,7 @@ def build_screener_inline_keyboard(
     kb_rows.append(
         [
             toggle_btn,
-            {"text": "🌍 Piyasa Özeti", "callback_data": "market:1H"},
+            {"text": "🌍 Piyasa Özeti", "callback_data": f"market:{tf_up}"},
         ]
     )
     return {"inline_keyboard": kb_rows}
@@ -530,8 +530,8 @@ def build_alarm_radar_inline_keyboard(state: Dict[str, Any]) -> Dict[str, Any]:
 
     kb.append(
         [
-            {"text": "🪙 Coin Seç & Alarm Ekle", "callback_data": "coins:1H"},
-            {"text": "🚀 Tümünü Tara", "callback_data": "scan:1H:0"},
+            {"text": "🪙 Coin Seç & Alarm Ekle", "callback_data": "coins:4H"},
+            {"text": "🚀 Tümünü Tara", "callback_data": "scan:4H:0"},
         ]
     )
     return {"inline_keyboard": kb}
@@ -550,13 +550,14 @@ def _fmt_price(val: Optional[float], ref_price: float) -> str:
 def format_forecast_telegram_html(
     fc: MarketForecast,
     symbol: str,
-    timeframe: str,
-    current_price: float,
+    timeframe: str = "4H",
+    current_price: float = 0.0,
     mtf_scores: Optional[Dict[str, float]] = None,
 ) -> str:
     """
-    Formats a MarketForecast into a detailed, well-structured, beginner-friendly Turkish HTML message
-    for Telegram that mirrors the 1-Status-Strip + 4-Card dashboard layout.
+    Formats a MarketForecast into a short, concise, high-signal Turkish HTML message for Telegram.
+    Does NOT include Futures Stop/TP levels (those belong exclusively to the Futures analysis view).
+    Clearly distinguishes Strong ('🛡️ Güçlü Destek' / '🧱 Güçlü Direnç') vs Ordinary ('🟢 Sıradan Destek' / '🔴 Sıradan Direnç').
     """
     def _p(val: Optional[float]) -> str:
         return _fmt_price(val, current_price)
@@ -564,243 +565,111 @@ def format_forecast_telegram_html(
     tf_up = timeframe.upper()
     if fc.score >= 15:
         trend_title = "📈 YÜKSELEN TREND"
-        trend_desc = "Alıcılar baskın, yön yukarı"
     elif fc.score <= -15:
         trend_title = "📉 DÜŞEN TREND"
-        trend_desc = "Satıcılar baskın, yön aşağı"
     else:
-        trend_title = "⚖️ YATAY / KARARSIZ TREND"
-        trend_desc = "Alıcı ve satıcılar dengede, kırılım bekleniyor"
+        trend_title = "⚖️ YATAY / KARARSIZ"
 
     if fc.readiness_score_5 >= 4:
-        rd_short = "Güçlü Kurulum"
+        rd_short = "Güçlü"
     elif fc.readiness_score_5 == 3:
-        rd_short = "Temkinli İzle"
+        rd_short = "İzle"
     else:
-        rd_short = "Bekle-Gör"
+        rd_short = "Bekle"
 
-    # Multi-timeframe alignment bar (15M | 1H | 4H | 1D)
+    # Compact multi-timeframe alignment bar (15M | 1H | 4H | 1D)
     mtf_line = ""
     if mtf_scores:
         parts_mtf = []
         for tf_k in ("15M", "1H", "4H", "1D"):
             if tf_k in mtf_scores:
                 sc_k = mtf_scores[tf_k]
-                if sc_k >= 15:
-                    lbl_k = f"📈 Yükselen ({sc_k:+.0f})"
-                elif sc_k <= -15:
-                    lbl_k = f"📉 Düşen ({sc_k:+.0f})"
-                else:
-                    lbl_k = f"⚖️ Yatay ({sc_k:+.0f})"
-                if tf_k == tf_up:
-                    parts_mtf.append(f"<b>[{tf_k}: {lbl_k}]</b>")
-                else:
-                    parts_mtf.append(f"{tf_k}: {lbl_k}")
+                ic_k = "📈" if sc_k >= 15 else ("📉" if sc_k <= -15 else "⚖️")
+                cell = f"{tf_k}:{ic_k}{sc_k:+.0f}"
+                parts_mtf.append(f"<b>[{cell}]</b>" if tf_k == tf_up else cell)
         if parts_mtf:
-            mtf_line = "⏱️ <b>Zaman Dilimleri:</b>\n" + " | ".join(parts_mtf)
+            mtf_line = "⏱️ " + " | ".join(parts_mtf)
 
-    # Card 1: MEVCUT TREND & KIRILIMLAR
-    smc_act = fc.smc
-    if smc_act and smc_act.structure_events:
-        last_ev = smc_act.structure_events[-1]
-        if "BULL_BOS" in last_ev.event_type or "BULL_CHOCH" in last_ev.event_type:
-            breakout_text = f"🟢 Yukarı Trend Kırılımı ({_p(last_ev.price)} aşımı)"
-        elif "BEAR_BOS" in last_ev.event_type or "BEAR_CHOCH" in last_ev.event_type:
-            breakout_text = f"🔴 Aşağı Trend Kırılımı ({_p(last_ev.price)} kırılımı)"
-        elif "BULL_SWEEP" in last_ev.event_type:
-            breakout_text = f"🟢 Dip Tuzak / Stop Avı ({_p(last_ev.price)} — Dönüş İzi)"
-        elif "BEAR_SWEEP" in last_ev.event_type:
-            breakout_text = f"⚠️ Tepe Tuzak / Stop Avı ({_p(last_ev.price)} — Satış İzi)"
-        else:
-            breakout_text = "Belirgin kırılım yok"
-    else:
-        breakout_text = "Henüz yeni kırılım yok"
-
-    sq_pct = fc.squeeze_energy_pct
-    if sq_pct >= 68:
-        squeeze_short = f"💥 Yüksek Sıkışma (%{sq_pct:.0f}) — ±%{fc.expected_breakout_move_pct:.1f} sert kırılım yakın!"
-    elif fc.choppiness_index >= 60:
-        squeeze_short = f"⚖️ Yatay Sıkışma (%{sq_pct:.0f}) — Kırılım yönü beklenmeli"
-    else:
-        squeeze_short = f"🌊 Akıcı Hareket (Beklenen Dalga: ±%{fc.expected_breakout_move_pct:.1f})"
-
-    ema20_val = fc.ema20_price if fc.ema20_price > 0 else current_price
-    if fc.nearest_resistance and fc.nearest_resistance > current_price:
-        up_break_price = fc.nearest_resistance
-    elif ema20_val > current_price:
-        up_break_price = ema20_val
-    else:
-        up_break_price = current_price * 1.008
-
-    if fc.nearest_support and fc.nearest_support < current_price:
-        down_break_price = fc.nearest_support
-    elif ema20_val < current_price:
-        down_break_price = ema20_val
-    else:
-        down_break_price = current_price * 0.992
-
-    # Card 2: DESTEK, DİRENÇ & HEDEFLER
+    # Support & Resistance (Strong vs Ordinary clearly separated)
     sup_str = _p(fc.nearest_support)
     res_str = _p(fc.nearest_resistance)
-    sup1_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Destek")
+    sup1_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Sıradan Destek")
     sup1_score = getattr(fc, "nearest_support_score", 0.0)
     sup1_reason = getattr(fc, "nearest_support_reason_tr", "")
-    res1_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res1_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
     res1_score = getattr(fc, "nearest_resistance_score", 0.0)
     res1_reason = getattr(fc, "nearest_resistance_reason_tr", "")
 
-    s1_stats = getattr(fc.support_levels[0], "stats_summary_tr", "") if fc.support_levels else ""
-    r1_stats = getattr(fc.resistance_levels[0], "stats_summary_tr", "") if fc.resistance_levels else ""
+    sup1_short_r = " + ".join(sup1_reason.split(" + ")[:2]) if sup1_reason else ""
+    res1_short_r = " + ".join(res1_reason.split(" + ")[:2]) if res1_reason else ""
+    sup1_meta = f" ({sup1_score:.0f}/100{f' · {sup1_short_r}' if sup1_short_r else ''})" if sup1_score > 0 else ""
+    res1_meta = f" ({res1_score:.0f}/100{f' · {res1_short_r}' if res1_short_r else ''})" if res1_score > 0 else ""
 
-    sup1_meta = f" <i>({sup1_score:.0f}/100{f' · {sup1_reason}' if sup1_reason else ''}{f' · {s1_stats}' if s1_stats else ''})</i>" if sup1_score > 0 else ""
-    res1_meta = f" <i>({res1_score:.0f}/100{f' · {res1_reason}' if res1_reason else ''}{f' · {r1_stats}' if r1_stats else ''})</i>" if res1_score > 0 else ""
-
+    sup2_line = ""
     if len(fc.support_levels) > 1:
         s2_obj = fc.support_levels[1]
-        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Destek")
+        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Sıradan Destek")
         s2_sc = getattr(s2_obj, "strength_score", 0.0)
-        s2_st = getattr(s2_obj, "stats_summary_tr", "")
-        sup2_line = f"\n• ↳ <b>2. {s2_tier}:</b> <code>{_p(s2_obj.price)}</code> <i>({s2_sc:.0f}/100{f' · {s2_st}' if s2_st else ''})</i>"
-    else:
-        sup2_line = ""
+        sup2_line = f"\n• 2. {s2_tier}: <code>{_p(s2_obj.price)}</code> <i>({s2_sc:.0f}/100)</i>"
 
+    res2_line = ""
     if len(fc.resistance_levels) > 1:
         r2_obj = fc.resistance_levels[1]
-        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Direnç")
+        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Sıradan Direnç")
         r2_sc = getattr(r2_obj, "strength_score", 0.0)
-        r2_st = getattr(r2_obj, "stats_summary_tr", "")
-        res2_line = f"\n• ↳ <b>2. {r2_tier}:</b> <code>{_p(r2_obj.price)}</code> <i>({r2_sc:.0f}/100{f' · {r2_st}' if r2_st else ''})</i>"
+        res2_line = f"\n• 2. {r2_tier}: <code>{_p(r2_obj.price)}</code> <i>({r2_sc:.0f}/100)</i>"
+
+    # Breakout / Level Action
+    sr_act_type = getattr(fc, "sr_action_type", "NONE")
+    sr_act_str = getattr(fc, "sr_action_status_tr", "")
+    ema20_val = fc.ema20_price if fc.ema20_price > 0 else current_price
+    up_break_price = fc.nearest_resistance if (fc.nearest_resistance and fc.nearest_resistance > current_price) else max(ema20_val, current_price * 1.008)
+    down_break_price = fc.nearest_support if (fc.nearest_support and fc.nearest_support < current_price) else min(ema20_val, current_price * 0.992)
+
+    if sr_act_type != "NONE" and sr_act_str:
+        short_act = sr_act_str.split(".")[0].strip() + "."
+        brk_line = f"• 🚨 <b>Durum:</b> {short_act}"
+    elif fc.squeeze_energy_pct >= 68:
+        brk_line = f"• 💥 <b>Sıkışma:</b> %{fc.squeeze_energy_pct:.0f} (±%{fc.expected_breakout_move_pct:.1f} kırılım yakın)"
     else:
-        res2_line = ""
+        brk_line = f"• 📐 <b>Kırılım Eşiği:</b> ⬆️ <code>{_p(up_break_price)}</code> üstü | ⬇️ <code>{_p(down_break_price)}</code> altı"
 
-    tp1_disp = fc.tp1_price if fc.tp1_price > 0 else fc.bullish_target_price
-    tp2_disp = fc.tp2_price if fc.tp2_price > 0 else fc.bullish_target_price
-    stop_disp = fc.stop_price if fc.stop_price > 0 else fc.bearish_invalidation_price
-    is_bear_target = (tp2_disp < current_price) or (fc.score < 0)
-    dir_label_tr = "Düşüş Hedefi" if is_bear_target else "Yükseliş Hedefi"
-
-    # Card 3: PARA GİRİŞ / ÇIKIŞI & BALİNALAR
+    # Cash Flow & Whales
     cmf_v = fc.cmf_value
     net_delta_20 = fc.net_delta_20_usd
     wh_score = fc.whale_accumulation_score
-
     if abs(net_delta_20) >= 1_000_000:
-        delta_fmt_str = f"{net_delta_20 / 1_000_000:+,.1f} Milyon USDT"
+        delta_fmt_str = f"{net_delta_20 / 1_000_000:+,.1f}M$"
     elif abs(net_delta_20) >= 1_000:
-        delta_fmt_str = f"{net_delta_20 / 1_000:+,.1f} Bin USDT"
+        delta_fmt_str = f"{net_delta_20 / 1_000:+,.1f}K$"
     else:
-        delta_fmt_str = f"{net_delta_20:+,.0f} USDT"
+        delta_fmt_str = f"{net_delta_20:+,.0f}$"
 
-    if cmf_v > 0.04:
-        mf_headline = "🟢 Net Para Girişi Var"
-    elif cmf_v < -0.04:
-        mf_headline = "🔴 Net Para Çıkışı Var"
-    else:
-        mf_headline = "⚪ Para Akışı Dengeli"
+    mf_ic = "🟢 Giriş" if cmf_v > 0.04 else ("🔴 Çıkış" if cmf_v < -0.04 else "⚪ Dengeli")
+    wh_ic = "🟢 Topluyor" if wh_score >= 60 else ("🔴 Satıyor" if wh_score <= 40 else "⚪ Nötr")
 
-    if wh_score >= 60:
-        whale_short = f"🟢 Balinalar Topluyor ({wh_score:.0f}/100)"
-    elif wh_score <= 40:
-        whale_short = f"🔴 Balinalar Satıyor ({wh_score:.0f}/100)"
-    else:
-        whale_short = f"⚪ Balinalar Dengede ({wh_score:.0f}/100)"
-
-    bid_wall_str = _p(fc.ob_bid_wall)
-    ask_wall_str = _p(fc.ob_ask_wall)
-
-    # Card 4: MIKNATIS & LİKİDASYON SEVİYELERİ
     poc_str = _p(fc.poc_price)
-    poc_dist_pct = abs(fc.poc_price - current_price) / max(current_price, 1e-9) * 100.0
-    if current_price >= fc.poc_price:
-        poc_relation = f"🟢 Fiyat, mıknatısın üstünde (+%{poc_dist_pct:.1f} — Destek)"
-    else:
-        poc_relation = f"🟡 Mıknatıs yukarıda (+%{poc_dist_pct:.1f} çekim bölgesi)"
-    avwap_low_str = _p(fc.avwap_low_price)
+    now_hm = time.strftime("%H:%M")
 
-    short_liq_str = "Yok"
-    long_liq_str = "Yok"
-    if smc_act and smc_act.liquidation_pools:
-        for p in smc_act.liquidation_pools:
-            if p.pool_type == "SHORT_LIQ":
-                short_liq_str = f"<code>{_p(p.price)}</code> (+%{p.distance_pct:.1f})"
-            elif p.pool_type == "LONG_LIQ":
-                long_liq_str = f"<code>{_p(p.price)}</code> (-%{p.distance_pct:.1f})"
-
-    now_hm = time.strftime("%H:%M:%S")
     lines = [
-        f"📊 <b>{symbol} ({tf_up}) DETAYLI ANALİZ RAPORU</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"<b>{trend_title} ({fc.score:+.0f}/100)</b> — <i>{trend_desc}</i>",
-        f"🚦 <b>Hazırlık:</b> <b>{fc.readiness_score_5}/5</b> <i>({rd_short})</i> | 🕒 <i>{now_hm}</i>",
+        f"📊 <b>{symbol} ({tf_up}) ÖZET ANALİZ</b> <i>({now_hm})</i>",
+        f"💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code> | <b>{trend_title} ({fc.score:+.0f})</b> | 🚦 <b>{fc.readiness_score_5}/5 ({rd_short})</b>",
     ]
     if mtf_line:
         lines.append(mtf_line)
 
-    fs = fc.futures_setup
-    if fs and fs.is_tradeable:
-        fut_summary_block = [
-            "",
-            f"⚡ <b>VADELİ İŞLEM RADARI ({tf_up}):</b> <b>{fs.direction_label_tr}</b>",
-            f"• 🛡️ <b>Güven Notu:</b> <b>{fs.confidence_score:.0f}/100 ({fs.confidence_grade})</b> | <b>R:R:</b> 1:{fs.rr_ratio:.2f} | <b>Kaldıraç:</b> Maks {fs.max_safe_leverage}x",
-            f"• 🎯 <b>Giriş:</b> <code>{_p(fs.entry_price)}</code> | <b>TP1:</b> <code>{_p(fs.tp1_price)}</code> | <b>TP2:</b> <code>{_p(fs.tp2_price)}</code> | <b>Stop:</b> <code>{_p(fs.stop_price)}</code>",
-        ]
-    else:
-        reason_short = fs.risk_warnings_tr[0] if (fs and fs.risk_warnings_tr) else "Teknik yapı vadeli işleme uygun değil."
-        fut_summary_block = [
-            "",
-            f"⚡ <b>VADELİ İŞLEM RADARI ({tf_up}):</b> ⛔ <b>İŞLEM TAVSİYE EDİLMEZ</b> (Güven: {fs.confidence_score:.0f}/100 - {fs.confidence_grade})",
-            f"• ⚠️ <b>Sebep:</b> <i>{reason_short}</i>",
-        ]
-
-    if fs and fs.is_tradeable:
-        c2_extra_line = f"• 🎯 <b>Onaylı Hedef ({fs.direction}):</b> <code>{_p(fs.tp1_price)}</code> ➔ <code>{_p(fs.tp2_price)}</code> | 🛡️ <b>Stop:</b> <code>{_p(fs.stop_price)}</code>"
-    else:
-        ch_w_pct = abs((fc.nearest_resistance or current_price) - (fc.nearest_support or current_price)) / max(current_price, 1e-9) * 100.0
-        c2_extra_line = f"• 📐 <b>Kanal Genişliği:</b> %{ch_w_pct:.2f} <i>(Risk Kalkanı Aktif: Kırılım Öncesi TP/Stop Önerilmez)</i>"
-
-    tl_rep = getattr(fc, "trendlines", None)
-    tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
-    sr_act_type = getattr(fc, "sr_action_type", "NONE")
-    sr_act_str = getattr(fc, "sr_action_status_tr", "")
-    sr_guide_str = getattr(fc, "sr_breakout_guide_tr", "")
-    breakout_tg_line = f"• <b>Kırılım / Seviye Durumu:</b> <b>{sr_act_str}</b>" if (sr_act_type != "NONE" and sr_act_str) else f"• <b>Kırılım İzi:</b> {breakout_text}"
-    tl_tg_line = f"\n• <b>Dinamik Kanal:</b> {tl_summary}" if tl_summary else ""
-    guide_tg_line = f"\n• 📐 <b>Kırılım Nasıl Olur?:</b> <i>{sr_guide_str}</i>" if sr_guide_str else ""
-
     lines.extend(
         [
-            "",
-            f"1️⃣ <b>MEVCUT TREND &amp; KIRILIMLAR ({tf_up})</b>",
-            f"• <b>Mevcut Trend:</b> {trend_title}",
-            breakout_tg_line + tl_tg_line + guide_tg_line,
-            f"• <b>Sıkışma Durumu:</b> {squeeze_short}",
-            f"• <b>Yukarı Kırılım Eşiği:</b> <code>{_p(up_break_price)}</code> üstü (Mum Kapanışı + Hacim)",
-            f"• <b>Aşağı Kırılım Eşiği:</b> <code>{_p(down_break_price)}</code> altı (Mum Kapanışı)",
-            "",
-            "2️⃣ <b>DESTEK &amp; DİRENÇ MİMARİSİ</b>",
-            f"• 💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code>",
-            f"• <b>{sup1_tier}:</b> <code>{sup_str}</code>{sup1_meta}{sup2_line}",
-            f"• <b>{res1_tier}:</b> <code>{res_str}</code>{res1_meta}{res2_line}",
-            c2_extra_line,
-            "",
-            "3️⃣ <b>PARA GİRİŞ / ÇIKIŞI &amp; BALİNALAR</b>",
-            f"• 💸 <b>Durum:</b> <b>{mf_headline}</b>",
-            f"• 💵 <b>Son 20 Mum Nakit:</b> <code>{delta_fmt_str}</code>",
-            f"• 🐋 <b>Balina Durumu:</b> {whale_short}",
-            f"• 📘 <b>Bekleyen Emirler:</b> %{fc.ob_imbalance_pct:.0f} Alıcı / %{100 - fc.ob_imbalance_pct:.0f} Satıcı",
-            f"• 🧱 <b>Duvarlar:</b> Alış <code>{bid_wall_str}</code> | Satış <code>{ask_wall_str}</code>",
-            "",
-            "4️⃣ <b>MIKNATIS (POC) &amp; TASFİYE BÖLGELERİ</b>",
-            f"• 🧲 <b>Mıknatıs:</b> <code>{poc_str}</code>",
-            f"• 🟡 <b>En Yoğun Fiyat (POC):</b> {poc_relation}",
-            f"• ⚓ <b>Dip Alıcı Maliyeti (AVWAP):</b> <code>{avwap_low_str}</code>",
-            f"• ⬆️ <b>Tahmini Short Tasfiye (25x-50x):</b> {short_liq_str}",
-            f"• ⬇️ <b>Tahmini Long Tasfiye (25x-50x):</b> {long_liq_str}",
-        ]
-        + fut_summary_block
-        + [
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "<i>👇 Alttaki dokunmatik butonlarla Vadeli İşlem (Long/Short) Planını açabilir, zaman dilimi değiştirebilir veya grafik isteyebilirsiniz:</i>",
+            "━━━━━━━━━━━━━━━━",
+            "🧱 <b>DESTEK &amp; DİRENÇ SINIFLANDIRMASI</b>",
+            f"• 1. <b>{sup1_tier}:</b> <code>{sup_str}</code><i>{sup1_meta}</i>{sup2_line}",
+            f"• 1. <b>{res1_tier}:</b> <code>{res_str}</code><i>{res1_meta}</i>{res2_line}",
+            brk_line,
+            "━━━━━━━━━━━━━━━━",
+            "🐋 <b>PARA AKIŞI &amp; MIKNATIS</b>",
+            f"• 💸 <b>Nakit:</b> {mf_ic} (<code>{delta_fmt_str}</code>) | 🐋 <b>Balina:</b> {wh_ic} ({wh_score:.0f}/100)",
+            f"• 🧲 <b>Mıknatıs (POC):</b> <code>{poc_str}</code> | 📘 <b>Emir:</b> %{fc.ob_imbalance_pct:.0f} Alıcı",
+            "<i>💡 Vadeli Giriş/Stop/TP için <b>[⚡ Vadeli İşlem Planı]</b> butonuna dokunun.</i>",
         ]
     )
     return "\n".join(lines)
@@ -809,108 +678,68 @@ def format_forecast_telegram_html(
 def format_futures_setup_telegram_html(
     fc: MarketForecast,
     symbol: str,
-    timeframe: str,
-    current_price: float,
+    timeframe: str = "4H",
+    current_price: float = 0.0,
     mtf_scores: Optional[Dict[str, float]] = None,
 ) -> str:
     """
-    Formats the dedicated Perpetual Futures (Vadeli İşlemler) Setup, Confidence & Risk Gate report.
-    If `fc.futures_setup.is_tradeable` is False, withholds Entry/TP/Stop and explains why the trade is rejected.
+    Formats a concise, high-clarity Perpetual Futures (Vadeli İşlemler) Setup report.
+    Shows Futures Entry, TP1, TP2, TP3 & Stop-Loss ONLY here when Futures analysis is selected.
     """
     def _p(val: Optional[float]) -> str:
         return _fmt_price(val, current_price)
 
     tf_up = timeframe.upper()
-    now_hm = time.strftime("%H:%M:%S")
+    now_hm = time.strftime("%H:%M")
     fs = fc.futures_setup
     sup_str = _p(fc.nearest_support)
     res_str = _p(fc.nearest_resistance)
-    sup_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Destek")
+    sup_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Sıradan Destek")
     sup_sc = getattr(fc, "nearest_support_score", 0.0)
-    res_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
     res_sc = getattr(fc, "nearest_resistance_score", 0.0)
-    sup_sc_tag = f" ({sup_sc:.0f}/100)" if sup_sc > 0 else ""
-    res_sc_tag = f" ({res_sc:.0f}/100)" if res_sc > 0 else ""
 
     lines = [
-        f"⚡ <b>{symbol} ({tf_up}) VADELİ İŞLEMLER (FUTURES) KURULUM &amp; GÜVEN RADARI</b>",
+        f"⚡ <b>{symbol} ({tf_up}) VADELİ İŞLEM PLANI</b> <i>({now_hm})</i>",
+        f"💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code> | 🎖️ <b>Güven:</b> <b>{fs.confidence_score:.0f}/100 ({fs.confidence_grade})</b>",
+        f"🧭 <b>Karar:</b> <b>{fs.direction_label_tr}</b>",
+        f"• <b>{sup_tier} ({sup_sc:.0f}p):</b> <code>{sup_str}</code> | <b>{res_tier} ({res_sc:.0f}p):</b> <code>{res_str}</code>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"💰 <b>Anlık Fiyat:</b> <code>{_p(current_price)} USDT</code> | 🕒 <i>{now_hm}</i>",
-        f"• <b>{sup_tier}{sup_sc_tag}:</b> <code>{sup_str}</code> | <b>{res_tier}{res_sc_tag}:</b> <code>{res_str}</code>",
-        f"🎖️ <b>Vadeli Güven Notu:</b> <b>{fs.confidence_score:.0f}/100 (Sınıf: {fs.confidence_grade})</b>",
-        f"🧭 <b>Radar Kararı:</b> <b>{fs.direction_label_tr}</b>",
     ]
 
     if not fs.is_tradeable:
-        lines.extend(
-            [
-                "",
-                "🛑 <b>RİSK KALKANI DEVREDE: GİRİŞ / TP / STOP VERİLMEDİ</b>",
-                "<i>Bu coinde şu an vadeli işlem (Long veya Short) açmak yüksek stop/tasfiye riski taşıdığı için sistem tarafından tavsiye edilmemektedir.</i>",
-                "",
-                "⚠️ <b>NEDEN İŞLEM AÇILMAMALI? (TESPİT EDİLEN RİSKLER)</b>",
-            ]
-        )
-        for rw in fs.risk_warnings_tr[:4]:
+        lines.append("🛑 <b>RİSK KALKANI: GİRİŞ / STOP / TP VERİLMEDİ</b>")
+        for rw in fs.risk_warnings_tr[:3]:
             lines.append(f"• ❌ {rw}")
-
-        if fs.positive_factors_tr:
-            lines.append("\n✅ <b>Mevcut Olumlu Noktalar (Yetersiz Kalanlar):</b>")
-            for pf in fs.positive_factors_tr[:2]:
-                lines.append(f"• {pf}")
-
         lines.extend(
             [
-                "",
-                "🔭 <b>NE ZAMAN İŞLEME GİRİLEBİLİR? (İZLEME ŞARTI)</b>",
-                f"• ⏳ {fs.wait_condition_tr}",
-                f"• 🧲 <b>Mıknatıs (POC):</b> <code>{_p(fc.poc_price)}</code> | <b>Balina:</b> {fc.whale_accumulation_score:.0f}/100",
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                "<i>💡 Başka bir zaman dilimini (15M / 1H / 4H / 1D) kontrol etmek veya şu an işleme uygun coinleri bulmak için <b>[📡 Vadeli Radar Taraması]</b> butonuna dokunun:</i>",
+                f"• ⏳ <b>Şart:</b> {fs.wait_condition_tr}",
+                f"• 🧲 <b>Mıknatıs (POC):</b> <code>{_p(fc.poc_price)}</code> | 🐋 <b>Balina:</b> {fc.whale_accumulation_score:.0f}/100",
             ]
         )
         return "\n".join(lines)
 
-    # Tradeable Setup: Show full Entry, TP1, TP2, TP3, Stop-Loss, Leverage & Futures Microstructure
     dir_sign_tp = "+" if fs.direction == "LONG" else "-"
     dir_sign_sl = "-" if fs.direction == "LONG" else "+"
     lines.extend(
         [
-            "",
-            "🎯 <b>VADELİ İŞLEM GİRİŞ, KÂR AL (TP) &amp; ZARAR-KES (STOP) PLANI</b>",
-            f"• 🚀 <b>İşlem Yönü:</b> <b>{fs.direction} ({'Yükseliş / Alış' if fs.direction == 'LONG' else 'Düşüş / Satış'})</b>",
-            f"• 📍 <b>Giriş Tipi:</b> {fs.entry_type_tr}",
-            f"• 🎯 <b>İdeal Giriş Yeri:</b> <code>{_p(fs.entry_price)} USDT</code> <i>(Aralık: {_p(fs.entry_zone_low)} – {_p(fs.entry_zone_high)})</i>",
-            f"• 🟢 <b>1. Kâr Al (TP1 — %50 Kapat &amp; Stopu Girişe Çek):</b> <code>{_p(fs.tp1_price)} USDT</code> (<b>{dir_sign_tp}%{fs.tp1_distance_pct:.2f}</b>)",
-            f"• 🟢 <b>2. Ana Hedef (TP2 — Direnç/Destek &amp; Mıknatıs):</b> <code>{_p(fs.tp2_price)} USDT</code> (<b>{dir_sign_tp}%{fs.tp2_distance_pct:.2f}</b>)",
-            f"• 🚀 <b>3. Uzatılmış Hedef (TP3 — Likidasyon Havuzu):</b> <code>{_p(fs.tp3_price)} USDT</code> (<b>{dir_sign_tp}%{fs.tp3_distance_pct:.2f}</b>)",
-            f"• 🛡️ <b>Zarar-Kes (Stop-Loss — İğne/Av Korumalı):</b> <code>{_p(fs.stop_price)} USDT</code> (<b>{dir_sign_sl}%{fs.stop_distance_pct:.2f}</b>)",
-            "",
-            "⚖️ <b>KAZANÇ / RİSK &amp; KALDIRAÇ DİSİPLİNİ</b>",
-            f"• 📊 <b>Kazanç / Risk Oranı (R:R):</b> <b>1 : {fs.rr_ratio:.2f}</b>",
-            f"• ⚙️ <b>Önerilen Maks. İzole Kaldıraç:</b> <b>{fs.max_safe_leverage}x</b> <i>(Aşırı kaldıraçtan kaçının)</i>",
-            f"• 🧱 <b>Destek/Direnç Gözetimi:</b> {fs.sr_context_tr}",
-            "",
-            "🔬 <b>VADELİ TEKNİK &amp; KURUMSAL ONAYLAR</b>",
-            f"• 📡 <b>Vadeli Mikro-Yapı:</b> {fs.futures_tech_summary_tr}",
-            f"• ⚡ <b>Kaldıraç Sıkıştırma:</b> {getattr(fs, 'leverage_squeeze_status_tr', '') or getattr(fc, 'leverage_squeeze_status_tr', '⚖️ Dengeli')}",
-        ]
-    )
-    for pf in fs.positive_factors_tr[:4]:
-        lines.append(f"• ✅ {pf}")
-    for rw in fs.risk_warnings_tr[:2]:
-        lines.append(f"• ⚠️ <i>Dikkat: {rw}</i>")
-
-    lines.extend(
-        [
+            f"🎯 <b>Giriş ({fs.direction}):</b> <code>{_p(fs.entry_price)} USDT</code> <i>({fs.entry_type_tr})</i>",
+            f"• 🟢 <b>TP1 (%50 Kâr Al):</b> <code>{_p(fs.tp1_price)}</code> (<b>{dir_sign_tp}%{fs.tp1_distance_pct:.2f}</b>)",
+            f"• 🟢 <b>TP2 (Ana Hedef):</b> <code>{_p(fs.tp2_price)}</code> (<b>{dir_sign_tp}%{fs.tp2_distance_pct:.2f}</b>)",
+            f"• 🚀 <b>TP3 (Uzatılmış):</b> <code>{_p(fs.tp3_price)}</code> (<b>{dir_sign_tp}%{fs.tp3_distance_pct:.2f}</b>)",
+            f"• 🛡️ <b>Zarar-Kes (Stop):</b> <code>{_p(fs.stop_price)}</code> (<b>{dir_sign_sl}%{fs.stop_distance_pct:.2f}</b>)",
             "━━━━━━━━━━━━━━━━━━━━━━",
-            "<i>👇 Alttaki butonlarla zaman dilimleri arasında geçiş yapabilir, grafiği görebilir veya kasa büyüklüğüne göre adet hesaplayabilirsiniz (YTD):</i>",
+            f"⚖️ <b>R:R:</b> <b>1:{fs.rr_ratio:.2f}</b> | ⚙️ <b>Maks. Kaldıraç:</b> <b>{fs.max_safe_leverage}x</b>",
         ]
     )
+    for pf in fs.positive_factors_tr[:2]:
+        lines.append(f"• ✅ {pf}")
+    if fs.risk_warnings_tr:
+        lines.append(f"• ⚠️ <i>{fs.risk_warnings_tr[0]}</i>")
     return "\n".join(lines)
 
 
-def format_futures_radar_scan_telegram_html(rows: List[Dict[str, Any]], timeframe: str = "1H") -> str:
+def format_futures_radar_scan_telegram_html(rows: List[Dict[str, Any]], timeframe: str = "4H") -> str:
     """
     Formats a multi-coin Perpetual Futures Radar scan separating Tradeable Setups from Rejected/Risky Coins.
     """
@@ -1011,7 +840,7 @@ def format_screener_telegram_html(rows: List[Dict], timeframe: str, only_high_qu
 def format_market_overview_telegram_html(
     coin_summaries: List[Dict[str, Any]],
     session_status_tr: str,
-    timeframe: str = "1H",
+    timeframe: str = "4H",
 ) -> str:
     """
     Formats a global market & cash flow bulletin (/piyasa or /nakit).
@@ -1111,8 +940,8 @@ def format_liquidation_magnet_telegram_html(
 def format_position_size_telegram_html(
     fc: MarketForecast,
     symbol: str,
-    timeframe: str,
-    current_price: float,
+    timeframe: str = "4H",
+    current_price: float = 0.0,
     capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
 ) -> str:
@@ -1168,10 +997,10 @@ def format_position_size_telegram_html(
     return "\n".join(lines)
 
 
-def build_breakout_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: str = "1H") -> Dict[str, Any]:
+def build_breakout_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: str = "4H") -> Dict[str, Any]:
     """
     Builds interactive touch buttons underneath the Support/Resistance Breakout & SFP Radar screen:
-      - Direct buttons for coins to open their full 4-card analysis or chart
+      - Direct buttons for coins to open their full analysis or chart
       - Timeframe switcher [15M | 1H | 4H | 1D] for the Breakout Radar
     """
     tf_up = timeframe.upper()
@@ -1218,12 +1047,9 @@ def build_breakout_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: 
     return {"inline_keyboard": kb_rows}
 
 
-def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timeframe: str = "1h") -> str:
+def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timeframe: str = "4h") -> str:
     """
     Formats the Multi-Coin Support/Resistance Breakout, Retest, SFP Trap & "How Does a Breakout Happen?" Radar.
-    Separates coins into:
-      1) Active Breakouts / SFP Traps / Retests (Direnç Kırılımı Geldi, Destek Kırılımı Geldi, Tuzak, Retest)
-      2) Approaching Breakout Zones (with exact candle-close + RVOL threshold rules)
     """
     tf_up = timeframe.upper()
     now_hm = time.strftime("%H:%M:%S")
@@ -1254,12 +1080,17 @@ def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timefra
         tl_st = getattr(tl, "breakout_status", "NONE") if tl else "NONE"
         tl_sum = getattr(tl, "summary_tr", "") if tl else ""
 
+        sup_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Sıradan Destek")
+        res_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
+        sup_p = fc.nearest_support or curr_p * 0.99
+        res_p = fc.nearest_resistance or curr_p * 1.01
+
         if act_t in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") or tl_st in ("BULL_BREAKOUT", "BEAR_BREAKDOWN"):
             msg_txt = act_str if act_t in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") else tl_sum
             active_events.append(
                 f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)} USDT</code> | Hacim: <b>{rvol:.2f}x</b>)\n"
                 f"  ↳ <b>{msg_txt}</b>\n"
-                f"  ↳ 🎯 Hedef: <code>{format(fc.tp1_price, p_fmt)}</code> ➔ <code>{format(fc.tp2_price, p_fmt)}</code> | 🛡️ Stop: <code>{format(fc.stop_price, p_fmt)}</code>"
+                f"  ↳ {sup_tier}: <code>{format(sup_p, p_fmt)}</code> | {res_tier}: <code>{format(res_p, p_fmt)}</code>"
             )
         elif act_t in ("BULL_SFP", "BEAR_SFP", "BULL_RETEST", "BEAR_RETEST"):
             active_events.append(
@@ -1269,19 +1100,19 @@ def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timefra
         else:
             res_obj = fc.resistance_levels[0] if fc.resistance_levels else None
             sup_obj = fc.support_levels[0] if fc.support_levels else None
-            res_bh = res_obj.band_high if res_obj else (fc.nearest_resistance or curr_p * 1.01)
-            sup_bl = sup_obj.band_low if sup_obj else (fc.nearest_support or curr_p * 0.99)
+            res_bh = res_obj.band_high if res_obj else res_p
+            sup_bl = sup_obj.band_low if sup_obj else sup_p
             dist_res_pct = abs(res_bh - curr_p) / max(curr_p, 1e-9) * 100.0
             dist_sup_pct = abs(curr_p - sup_bl) / max(curr_p, 1e-9) * 100.0
             if dist_res_pct <= dist_sup_pct:
                 near_events.append(
-                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📈 <b>Direnç Kırılımına %{dist_res_pct:.2f}</b> kaldı ➔ "
-                    f"<code>{format(res_bh, p_fmt)}</code> üstü mum kapanışı gerekli"
+                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📈 <b>{res_tier} Kırılımına %{dist_res_pct:.2f}</b> ➔ "
+                    f"<code>{format(res_bh, p_fmt)}</code> üstü kapanış"
                 )
             else:
                 near_events.append(
-                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📉 <b>Destek Kırılımına %{dist_sup_pct:.2f}</b> mesafede ➔ "
-                    f"<code>{format(sup_bl, p_fmt)}</code> altı mum kapanışı tehlikeli"
+                    f"• <b>{sym}</b> (<code>{format(curr_p, p_fmt)}</code>): 📉 <b>{sup_tier} Kırılımına %{dist_sup_pct:.2f}</b> ➔ "
+                    f"<code>{format(sup_bl, p_fmt)}</code> altı kapanış"
                 )
 
     if active_events:
@@ -1299,7 +1130,7 @@ def format_breakout_radar_scan_telegram_html(rows: List[Dict[str, Any]], timefra
         [
             "━━━━━━━━━━━━━━━━━━━━━━",
             f"🕒 <i>Son Tarama: {now_hm} | 7/24 Otomatik Kırılım Bildirimleri Aktif!</i>",
-            "<i>👇 Detaylı 4 kart analizini veya grafiğini görmek istediğiniz coine dokunun:</i>",
+            "<i>👇 Grafiğini ve özet analizini görmek istediğiniz coine dokunun:</i>",
         ]
     )
     return "\n".join(lines)
@@ -1312,11 +1143,18 @@ def generate_telegram_chart_png(
     df: pd.DataFrame,
     fc: MarketForecast,
     symbol: str,
-    timeframe: str,
+    timeframe: str = "4h",
+    include_futures_levels: bool = False,
 ) -> Optional[bytes]:
     """
     Renders a crisp, dark-mode 2-panel chart (Candlesticks + EMA 20/50 + Support/Resistance
-    + POC Magnet + TP/Stop levels + Money Flow / RSI panel) into PNG bytes in ~0.15s.
+    + POC Magnet + RSI panel) into PNG bytes in ~0.15s.
+    IMPORTANT:
+      - When `include_futures_levels=False` (default for general analysis):
+        Does NOT draw Futures Entry / TP1 / TP2 / Stop-Loss lines on the chart.
+      - When `include_futures_levels=True` (selected via Vadeli Analiz):
+        Draws Futures Entry, TP1, TP2, and Stop-Loss lines if `fc.futures_setup.is_tradeable`.
+      - Explicitly labels Support & Resistance as 'Güçlü Destek' vs 'Sıradan Destek' and 'Güçlü Direnç' vs 'Sıradan Direnç'.
     """
     try:
         import matplotlib
@@ -1373,15 +1211,20 @@ def generate_telegram_chart_png(
 
         y_min = float(np.min(lows))
         y_max = float(np.max(highs))
-        # Expand Y-bounds to include nearby key levels (within ±15% of current price) so TP/Stop/POC are never clipped
         candidate_levels = [
             fc.nearest_support,
             fc.nearest_resistance,
             fc.poc_price,
-            fc.tp1_price,
-            fc.tp2_price,
-            fc.stop_price,
         ]
+        if include_futures_levels and getattr(fc, "futures_setup", None) and fc.futures_setup.is_tradeable:
+            candidate_levels.extend(
+                [
+                    fc.futures_setup.entry_price,
+                    fc.futures_setup.tp1_price,
+                    fc.futures_setup.tp2_price,
+                    fc.futures_setup.stop_price,
+                ]
+            )
         for lv in candidate_levels:
             if lv and lv > 0 and abs(lv - last_price) / max(last_price, 1e-9) <= 0.15:
                 y_min = min(y_min, float(lv))
@@ -1427,14 +1270,15 @@ def generate_telegram_chart_png(
                     max(sup.band_low, y_lo),
                     min(sup.band_high, y_hi),
                     color="#00E676",
-                    alpha=0.11 if is_str_s else 0.055,
+                    alpha=0.12 if is_str_s else 0.05,
                     zorder=2,
                 )
-                s_lbl = f"{idx_s}. Güçlü Destek ({s_sc:.0f}p)" if is_str_s else f"{idx_s}. Destek ({s_sc:.0f}p)"
-                _draw_level(sup.price, "#00E676", s_lbl, "-" if is_str_s else "--")
+                s_lbl = f"{idx_s}. Güçlü Destek ({s_sc:.0f}p)" if is_str_s else f"{idx_s}. Sıradan Destek ({s_sc:.0f}p)"
+                _draw_level(sup.price, "#00E676" if is_str_s else "#6EE7B7", s_lbl, "-" if is_str_s else "--")
         if not getattr(fc, "support_levels", None):
-            sup_chart_lbl = "Güçlü Destek" if getattr(fc, "nearest_support_score", 0.0) >= 58.0 else "Destek"
-            _draw_level(fc.nearest_support, "#00E676", sup_chart_lbl, "-" if sup_chart_lbl == "Güçlü Destek" else "--")
+            is_str_s0 = getattr(fc, "nearest_support_score", 0.0) >= 62.0
+            sup_chart_lbl = "Güçlü Destek" if is_str_s0 else "Sıradan Destek"
+            _draw_level(fc.nearest_support, "#00E676" if is_str_s0 else "#6EE7B7", sup_chart_lbl, "-" if is_str_s0 else "--")
 
         for idx_r, res in enumerate(getattr(fc, "resistance_levels", [])[:2], start=1):
             if y_lo <= res.price <= y_hi:
@@ -1444,17 +1288,19 @@ def generate_telegram_chart_png(
                     max(res.band_low, y_lo),
                     min(res.band_high, y_hi),
                     color="#FF5252",
-                    alpha=0.11 if is_str_r else 0.055,
+                    alpha=0.12 if is_str_r else 0.05,
                     zorder=2,
                 )
-                r_lbl = f"{idx_r}. Güçlü Direnç ({r_sc:.0f}p)" if is_str_r else f"{idx_r}. Direnç ({r_sc:.0f}p)"
-                _draw_level(res.price, "#FF5252", r_lbl, "-" if is_str_r else "--")
+                r_lbl = f"{idx_r}. Güçlü Direnç ({r_sc:.0f}p)" if is_str_r else f"{idx_r}. Sıradan Direnç ({r_sc:.0f}p)"
+                _draw_level(res.price, "#FF5252" if is_str_r else "#FDA4AF", r_lbl, "-" if is_str_r else "--")
         if not getattr(fc, "resistance_levels", None):
-            res_chart_lbl = "Güçlü Direnç" if getattr(fc, "nearest_resistance_score", 0.0) >= 58.0 else "Direnç"
-            _draw_level(fc.nearest_resistance, "#FF5252", res_chart_lbl, "-" if res_chart_lbl == "Güçlü Direnç" else "--")
+            is_str_r0 = getattr(fc, "nearest_resistance_score", 0.0) >= 62.0
+            res_chart_lbl = "Güçlü Direnç" if is_str_r0 else "Sıradan Direnç"
+            _draw_level(fc.nearest_resistance, "#FF5252" if is_str_r0 else "#FDA4AF", res_chart_lbl, "-" if is_str_r0 else "--")
 
         _draw_level(fc.poc_price, "#FACC15", "Mıknatıs (POC)", "-.")
-        if getattr(fc, "futures_setup", None) and fc.futures_setup.is_tradeable:
+        if include_futures_levels and getattr(fc, "futures_setup", None) and fc.futures_setup.is_tradeable:
+            _draw_level(fc.futures_setup.entry_price, "#E2E8F0", f"Vadeli Giriş ({fc.futures_setup.direction})", "-.")
             _draw_level(fc.futures_setup.tp1_price, "#38BDF8", "Hedef 1 (TP1)", ":")
             _draw_level(fc.futures_setup.tp2_price, "#10B981", "Hedef 2 (TP2)", ":")
             _draw_level(fc.futures_setup.stop_price, "#FB7185", "Zarar-Kes (Stop)", ":")
@@ -1519,12 +1365,13 @@ def generate_telegram_chart_png(
                 zorder=8,
             )
 
-        ax1.set_xlim(-1.5, len(plot_df) + 14)
+        ax1.set_xlim(-1.5, len(plot_df) + 15.5)
         ax1.set_ylim(y_lo, y_hi)
 
         trend_tag = "YÜKSELEN TREND" if fc.score >= 15 else ("DÜŞEN TREND" if fc.score <= -15 else "YATAY TREND")
+        mode_tag = "VADELİ İŞLEM PLANI" if include_futures_levels else trend_tag
         ax1.set_title(
-            f"{symbol} [{timeframe.upper()}] — {trend_tag} ({fc.score:+.0f}/100) | Hazırlık: {fc.readiness_score_5}/5 | Fiyat: {_p(last_price)} USDT",
+            f"{symbol} [{timeframe.upper()}] — {mode_tag} ({fc.score:+.0f}/100) | Hazırlık: {fc.readiness_score_5}/5 | Fiyat: {_p(last_price)} USDT",
             color="#F8FAFC",
             fontsize=11,
             fontweight="bold",
@@ -1542,7 +1389,7 @@ def generate_telegram_chart_png(
             ax2.axhline(30, color="#00E676", linestyle="--", linewidth=0.8, alpha=0.6)
             ax2.axhline(50, color="#64748B", linestyle=":", linewidth=0.7, alpha=0.5)
             ax2.set_ylim(15, 85)
-        ax2.set_xlim(-1.5, len(plot_df) + 14)
+        ax2.set_xlim(-1.5, len(plot_df) + 15.5)
         ax2.set_ylabel("RSI", color="#94A3B8", fontsize=8.5)
 
         if "timestamp" in plot_df.columns:
@@ -1698,11 +1545,15 @@ def send_telegram_photo(
 ) -> Tuple[bool, str]:
     """
     Uploads a PNG chart image to Telegram via multipart/form-data using pure standard library urllib.
+    If caption_html exceeds Telegram's 1024-char photo caption limit, sends the photo first and
+    immediately sends the full HTML text + keyboard below it so HTML tags are never truncated.
     """
-    token = (bot_token or "").strip()
-    cid = (chat_id or "").strip()
+    token = _clean_bot_token(bot_token)
+    cid = _clean_chat_id(chat_id)
     if not token or not cid or not photo_bytes:
         return False, "Eksik Telegram bilgisi veya görsel verisi."
+
+    caption_fits = len(caption_html or "") <= 1020
 
     boundary = f"----AntigravityBoundary{uuid.uuid4().hex}"
     body = io.BytesIO()
@@ -1713,10 +1564,10 @@ def send_telegram_photo(
         body.write(f"{value}\r\n".encode("utf-8"))
 
     _add_field("chat_id", cid)
-    if caption_html:
-        _add_field("caption", caption_html[:1020])
+    if caption_html and caption_fits:
+        _add_field("caption", caption_html)
         _add_field("parse_mode", "HTML")
-    if reply_markup is not None:
+    if reply_markup is not None and caption_fits:
         _add_field("reply_markup", json.dumps(reply_markup, ensure_ascii=False))
 
     body.write(f"--{boundary}\r\n".encode("utf-8"))
@@ -1736,7 +1587,70 @@ def send_telegram_photo(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             res = json.loads(resp.read().decode("utf-8"))
             if res.get("ok"):
+                if caption_html and not caption_fits:
+                    send_telegram_message(token, cid, caption_html, reply_markup=reply_markup)
                 return True, "✅ Grafik ve analiz Telegram hesabınıza gönderildi!"
             return False, f"Telegram Fotoğraf Hatası: {res.get('description', 'Bilinmeyen hata')}"
     except Exception as e:
         return False, f"❌ Grafik gönderilemedi: {e}"
+
+
+def edit_telegram_photo_message(
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    photo_bytes: bytes,
+    caption_html: str = "",
+    reply_markup: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> bool:
+    """
+    Edits an existing Telegram photo message in-place with a new chart image and HTML caption
+    via `editMessageMedia`. Returns True if updated in-place, False if the target message was text-only.
+    """
+    token = _clean_bot_token(bot_token)
+    cid = _clean_chat_id(chat_id)
+    if not token or not cid or not message_id or not photo_bytes or len(caption_html or "") > 1020:
+        return False
+
+    boundary = f"----AntigravityMediaBoundary{uuid.uuid4().hex}"
+    body = io.BytesIO()
+
+    def _add_field(name: str, value: str) -> None:
+        body.write(f"--{boundary}\r\n".encode("utf-8"))
+        body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.write(f"{value}\r\n".encode("utf-8"))
+
+    media_obj: Dict[str, Any] = {
+        "type": "photo",
+        "media": "attach://chart_photo",
+    }
+    if caption_html:
+        media_obj["caption"] = caption_html
+        media_obj["parse_mode"] = "HTML"
+
+    _add_field("chat_id", cid)
+    _add_field("message_id", str(message_id))
+    _add_field("media", json.dumps(media_obj, ensure_ascii=False))
+    if reply_markup is not None:
+        _add_field("reply_markup", json.dumps(reply_markup, ensure_ascii=False))
+
+    body.write(f"--{boundary}\r\n".encode("utf-8"))
+    body.write(b'Content-Disposition: form-data; name="chart_photo"; filename="chart.png"\r\n')
+    body.write(b"Content-Type: image/png\r\n\r\n")
+    body.write(photo_bytes)
+    body.write(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    url = f"https://api.telegram.org/bot{token}/editMessageMedia"
+    req = urllib.request.Request(
+        url,
+        data=body.getvalue(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            return bool(res.get("ok"))
+    except Exception:
+        return False

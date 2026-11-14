@@ -519,8 +519,8 @@ with st.sidebar:
 
     send_chart_chk = st.checkbox(
         "🖼️ Analizle Birlikte Grafik Görseli de Gönder",
-        value=bool(tg_state.get("send_chart_with_analysis", False)),
-        help="İşaretlenirse Telegram'a analiz gönderirken Destek/Direnç/POC çizgili grafik görselini de otomatik gönderir.",
+        value=bool(tg_state.get("send_chart_with_analysis", True)),
+        help="Telegram analiz çıktıları grafik görseliyle birlikte gönderilir.",
     )
     radar_chk = st.checkbox(
         "📡 7/24 Otomatik Kırılım & Balina Radarı",
@@ -528,7 +528,7 @@ with st.sidebar:
         help="Bot çalışırken izleme listenizdeki güçlü kırılım, balina girişi ve sıkışmaları otomatik bildirir.",
     )
     if (
-        send_chart_chk != bool(tg_state.get("send_chart_with_analysis", False))
+        send_chart_chk != bool(tg_state.get("send_chart_with_analysis", True))
         or radar_chk != bool(tg_state.get("radar_enabled", True))
         or exchange_choice != str(tg_state.get("primary_exchange", "binance"))
     ):
@@ -551,15 +551,15 @@ with st.sidebar:
                 tg_token_input,
                 tg_chat_input,
                 "✅ <b>Bağlantı &amp; Dokunmatik Menü Aktif!</b>\n"
-                "Akıllı Kripto Karar-Destek &amp; Radar Terminali (v7.0) bağlı.\n\n"
-                "👇 <i>Alt menüdeki dokunmatik butonlardan veya aşağıdaki coin listesinden tek dokunuşla analiz başlatabilirsiniz:</i>",
+                "Akıllı Kripto Karar-Destek &amp; Radar Terminali (Varsayılan: 4H) bağlı.\n\n"
+                "👇 <i>Alt menüdeki dokunmatik butonlardan veya aşağıdaki coin listesinden tek dokunuşla grafikli analiz başlatabilirsiniz:</i>",
                 reply_markup=build_main_reply_keyboard(),
             )
             send_telegram_message(
                 tg_token_input,
                 tg_chat_input,
-                "🪙 <b>Hızlı Coin Seçim Menüsü (1H):</b>",
-                reply_markup=build_coin_list_inline_keyboard(st.session_state.watchlist, "1H"),
+                "🪙 <b>Hızlı Coin Seçim Menüsü (4H):</b>",
+                reply_markup=build_coin_list_inline_keyboard(st.session_state.watchlist, "4H"),
             )
             if ok_t:
                 st.success("✅ Dokunmatik menü gitti!")
@@ -659,15 +659,15 @@ with st.spinner("Canlı borsa verileri, trend, para giriş/çıkışı ve likida
             else:
                 tf_data, tf_forecasts, order_flow, src = all_coin_results[sym]
 
-            df_1h = tf_data["1H"]
+            df_4h = tf_data["4H"]
             fc_15m = tf_forecasts["15M"]
             fc_1h = tf_forecasts["1H"]
             fc_4h = tf_forecasts["4H"]
             fc_1d = tf_forecasts["1D"]
 
-            last_close = float(df_1h["close"].iloc[-1])
-            cmf_1h = float(df_1h["cmf"].iloc[-1])
-            mtf_master = 0.15 * fc_15m.score + 0.30 * fc_1h.score + 0.30 * fc_4h.score + 0.25 * fc_1d.score
+            last_close = float(df_4h["close"].iloc[-1])
+            cmf_4h = float(df_4h["cmf"].iloc[-1])
+            mtf_master = 0.15 * fc_15m.score + 0.25 * fc_1h.score + 0.35 * fc_4h.score + 0.25 * fc_1d.score
 
             def badge(score: float) -> str:
                 if score >= 15:
@@ -678,67 +678,67 @@ with st.spinner("Canlı borsa verileri, trend, para giriş/çıkışı ve likida
 
             flow_tag = (
                 "🟢 Para Girişi"
-                if cmf_1h > 0.04
-                else ("🔴 Para Çıkışı" if cmf_1h < -0.04 else "⚪ Dengeli")
+                if cmf_4h > 0.04
+                else ("🔴 Para Çıkışı" if cmf_4h < -0.04 else "⚪ Dengeli")
             )
 
-            fut_1h = getattr(fc_1h, "futures_setup", None)
-            if fut_1h and fut_1h.is_tradeable:
-                fut_dir_icon = "🟢 LONG" if fut_1h.direction == "LONG" else "🔴 SHORT"
+            fut_4h = getattr(fc_4h, "futures_setup", None)
+            if fut_4h and fut_4h.is_tradeable:
+                fut_dir_icon = "🟢 LONG" if fut_4h.direction == "LONG" else "🔴 SHORT"
                 fut_radar_tag = (
-                    f"{fut_dir_icon} ({fut_1h.confidence_score:.0f}/100 - {fut_1h.confidence_grade}) | "
-                    f"Giriş:{price_fmt(fut_1h.entry_price)} TP1:{price_fmt(fut_1h.tp1_price)} Stop:{price_fmt(fut_1h.stop_price)}"
+                    f"{fut_dir_icon} ({fut_4h.confidence_score:.0f}/100 - {fut_4h.confidence_grade}) | "
+                    f"Giriş:{price_fmt(fut_4h.entry_price)} TP1:{price_fmt(fut_4h.tp1_price)} Stop:{price_fmt(fut_4h.stop_price)}"
                 )
-            elif fut_1h:
-                fut_radar_tag = f"⛔ Girilmez (Riskli - Güven:{fut_1h.confidence_score:.0f}/100 {fut_1h.confidence_grade})"
+            elif fut_4h:
+                fut_radar_tag = f"⛔ Girilmez (Riskli - Güven:{fut_4h.confidence_score:.0f}/100 {fut_4h.confidence_grade})"
             else:
                 fut_radar_tag = "⛔ Hesaplanmadı"
 
-            sup_icon_1h = "🛡️" if getattr(fc_1h, "nearest_support_score", 0.0) >= 58.0 else "🟢"
-            res_icon_1h = "🧱" if getattr(fc_1h, "nearest_resistance_score", 0.0) >= 58.0 else "🔴"
+            sup_tier_4h = getattr(fc_4h, "nearest_support_tier_tr", "🟢 Sıradan Destek")
+            res_tier_4h = getattr(fc_4h, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
             screener_rows.append({
-                "_sort_ready": fc_1h.readiness_score_5,
-                "_sort_whale": abs(fc_1h.whale_accumulation_score - 50.0),
+                "_sort_ready": fc_4h.readiness_score_5,
+                "_sort_whale": abs(fc_4h.whale_accumulation_score - 50.0),
                 "_sort_master": abs(mtf_master),
-                "_fut_tradeable": bool(fut_1h and fut_1h.is_tradeable),
-                "_fut_conf": float(fut_1h.confidence_score) if fut_1h else 0.0,
+                "_fut_tradeable": bool(fut_4h and fut_4h.is_tradeable),
+                "_fut_conf": float(fut_4h.confidence_score) if fut_4h else 0.0,
                 "_raw_price": last_close,
-                "_fc_1h": fc_1h,
+                "_fc_4h": fc_4h,
                 "Coin": sym,
                 "Fiyat (USDT)": f"{price_fmt(last_close)}",
                 "24s Değişim": f"{order_flow.price_change_24h_pct:+.2f}%",
-                "⚡ Vadeli İşlem Radarı (1S)": fut_radar_tag,
-                "Onay": f"{fc_1h.readiness_score_5}/5",
+                "⚡ Vadeli İşlem Radarı (4S)": fut_radar_tag,
+                "Onay": f"{fc_4h.readiness_score_5}/5",
                 "15D Trend": badge(fc_15m.score),
                 "1S Trend": badge(fc_1h.score),
                 "4S Trend": badge(fc_4h.score),
                 "1G Trend": badge(fc_1d.score),
-                "Para Akışı (1S)": flow_tag,
-                "🐋 Balina İzi": f"{fc_1h.whale_accumulation_score:.0f}/100",
-                "Destek / Direnç": f"{sup_icon_1h} {price_fmt(fc_1h.nearest_support)} / {res_icon_1h} {price_fmt(fc_1h.nearest_resistance)}",
+                "Para Akışı (4S)": flow_tag,
+                "🐋 Balina İzi": f"{fc_4h.whale_accumulation_score:.0f}/100",
+                "Destek / Direnç": f"{sup_tier_4h}: {price_fmt(fc_4h.nearest_support)} / {res_tier_4h}: {price_fmt(fc_4h.nearest_resistance)}",
             })
         except Exception as exc:
             st.error(f"{sym} verisi alınırken hata oluştu: {exc}")
 
-with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı Özeti (Açmak İçin Tıklayın)", expanded=False):
+with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı Özeti (4H — Açmak İçin Tıklayın)", expanded=False):
     if all_coin_results:
         magnet_sym, magnet_cmf = None, -999.0
         outflow_sym, outflow_cmf = None, 999.0
-        bull_1h_count = 0
+        bull_4h_count = 0
         tradeable_fut_count = 0
         for sym_g, (tfd_g, tffc_g, _, _) in all_coin_results.items():
-            cmf_g = float(tfd_g["1H"]["cmf"].iloc[-1]) if "1H" in tfd_g else 0.0
+            cmf_g = float(tfd_g["4H"]["cmf"].iloc[-1]) if "4H" in tfd_g else 0.0
             if cmf_g > magnet_cmf:
                 magnet_cmf, magnet_sym = cmf_g, sym_g
             if cmf_g < outflow_cmf:
                 outflow_cmf, outflow_sym = cmf_g, sym_g
-            if "1H" in tffc_g and tffc_g["1H"].score >= 15.0:
-                bull_1h_count += 1
-            if "1H" in tffc_g and getattr(tffc_g["1H"], "futures_setup", None) and tffc_g["1H"].futures_setup.is_tradeable:
+            if "4H" in tffc_g and tffc_g["4H"].score >= 15.0:
+                bull_4h_count += 1
+            if "4H" in tffc_g and getattr(tffc_g["4H"], "futures_setup", None) and tffc_g["4H"].futures_setup.is_tradeable:
                 tradeable_fut_count += 1
 
         st.markdown(
-            f"**🌍 Piyasa Özeti:** Saatlikte **{bull_1h_count}/{len(all_coin_results)}** coin yükselişte &nbsp;|&nbsp; "
+            f"**🌍 Piyasa Özeti (4H):** 4 Saatlikte **{bull_4h_count}/{len(all_coin_results)}** coin yükselişte &nbsp;|&nbsp; "
             f"**⚡ Vadeli İşleme Uygun Coin:** `{tradeable_fut_count}/{len(all_coin_results)}` &nbsp;|&nbsp; "
             f"**🧲 En Güçlü Para Girişi:** `{magnet_sym}` &nbsp;|&nbsp; **📤 En Çok Para Çıkışı:** `{outflow_sym}`"
         )
@@ -767,8 +767,8 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
             )
         with sc_btn2:
             if st.button("📲 Tarama Raporunu Telegram'a Gönder", use_container_width=True):
-                msg_html = format_screener_telegram_html(screener_rows, "1H")
-                kb_sc = build_screener_inline_keyboard(screener_rows, "1H", False)
+                msg_html = format_screener_telegram_html(screener_rows, "4H")
+                kb_sc = build_screener_inline_keyboard(screener_rows, "4H", False)
                 ok_tg, status_tg = send_telegram_message(
                     tg_token_input,
                     tg_chat_input,
@@ -785,12 +785,12 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
                     {
                         "symbol": r["Coin"],
                         "price": r["_raw_price"],
-                        "fc": r["_fc_1h"],
+                        "fc": r["_fc_4h"],
                     }
                     for r in screener_rows
                 ]
-                msg_brk_radar = format_breakout_radar_scan_telegram_html(brk_entries, "1H")
-                kb_brk_radar = build_breakout_radar_inline_keyboard(brk_entries, "1H")
+                msg_brk_radar = format_breakout_radar_scan_telegram_html(brk_entries, "4H")
+                kb_brk_radar = build_breakout_radar_inline_keyboard(brk_entries, "4H")
                 ok_br, status_br = send_telegram_message(
                     tg_token_input,
                     tg_chat_input,
@@ -807,12 +807,12 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
                     {
                         "symbol": r["Coin"],
                         "price": r["_raw_price"],
-                        "fc": r["_fc_1h"],
+                        "fc": r["_fc_4h"],
                     }
                     for r in screener_rows
                 ]
-                msg_fut_radar = format_futures_radar_scan_telegram_html(radar_entries, "1H")
-                kb_fut_radar = build_futures_radar_inline_keyboard(radar_entries, "1H")
+                msg_fut_radar = format_futures_radar_scan_telegram_html(radar_entries, "4H")
+                kb_fut_radar = build_futures_radar_inline_keyboard(radar_entries, "4H")
                 ok_fr, status_fr = send_telegram_message(
                     tg_token_input,
                     tg_chat_input,
@@ -843,9 +843,9 @@ with col_sel2:
     active_tf = st.radio(
         "⏱️ Zaman Dilimi Seçin",
         options=["15M", "1H", "4H", "1D"],
-        index=1,
+        index=2,
         horizontal=True,
-        help="15M: 15 Dakika | 1H: 1 Saat | 4H: 4 Saat | 1D: 1 Gün",
+        help="Varsayılan: 4H (4 Saat) | 15M: 15 Dakika | 1H: 1 Saat | 1D: 1 Gün",
     )
 
 tf_data, tf_forecasts, order_flow, source_used = all_coin_results[active_symbol]
@@ -865,21 +865,28 @@ with col_sel3:
             mtf_scores={k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts},
         )
         kb_an = build_analysis_inline_keyboard(active_symbol, active_tf)
-        ok_c, msg_c = send_telegram_message(
-            tg_token_input,
-            tg_chat_input,
-            coin_html,
-            reply_markup=kb_an,
+        png_bytes = generate_telegram_chart_png(
+            df_active,
+            fc_active,
+            active_symbol,
+            active_tf,
+            include_futures_levels=False,
         )
-        if send_chart_chk:
-            png_bytes = generate_telegram_chart_png(df_active, fc_active, active_symbol, active_tf)
-            if png_bytes:
-                send_telegram_photo(
-                    tg_token_input,
-                    tg_chat_input,
-                    png_bytes,
-                    caption_html=f"🖼️ <b>{active_symbol} [{active_tf}] Kritik Seviyeler &amp; Grafik Görünümü</b>",
-                )
+        if png_bytes:
+            ok_c, msg_c = send_telegram_photo(
+                tg_token_input,
+                tg_chat_input,
+                png_bytes,
+                caption_html=coin_html,
+                reply_markup=kb_an,
+            )
+        else:
+            ok_c, msg_c = send_telegram_message(
+                tg_token_input,
+                tg_chat_input,
+                coin_html,
+                reply_markup=kb_an,
+            )
         if ok_c:
             st.success(msg_c)
         else:
@@ -1077,10 +1084,10 @@ with c1:
     )
 
 with c2:
-    sup1_tier = getattr(fc_active, "nearest_support_tier_tr", "🟢 Destek")
+    sup1_tier = getattr(fc_active, "nearest_support_tier_tr", "🟢 Sıradan Destek")
     sup1_score = getattr(fc_active, "nearest_support_score", 0.0)
     sup1_reason = getattr(fc_active, "nearest_support_reason_tr", "")
-    res1_tier = getattr(fc_active, "nearest_resistance_tier_tr", "🔴 Direnç")
+    res1_tier = getattr(fc_active, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
     res1_score = getattr(fc_active, "nearest_resistance_score", 0.0)
     res1_reason = getattr(fc_active, "nearest_resistance_reason_tr", "")
 
@@ -1094,7 +1101,7 @@ with c2:
 
     if len(fc_active.support_levels) > 1:
         s2_obj = fc_active.support_levels[1]
-        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Destek")
+        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Sıradan Destek")
         s2_sc = getattr(s2_obj, "strength_score", 0.0)
         s2_st = getattr(s2_obj, "stats_summary_tr", "")
         sup2_html = f"<br>• <span style='color:#94A3B8;'>2. {s2_tier}:</span> <b style='color:#34D399;'>{price_fmt(s2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({s2_sc:.0f}/100{f' · {s2_st}' if s2_st else ''})</span>"
@@ -1103,25 +1110,18 @@ with c2:
 
     if len(fc_active.resistance_levels) > 1:
         r2_obj = fc_active.resistance_levels[1]
-        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Direnç")
+        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Sıradan Direnç")
         r2_sc = getattr(r2_obj, "strength_score", 0.0)
         r2_st = getattr(r2_obj, "stats_summary_tr", "")
         res2_html = f"<br>• <span style='color:#94A3B8;'>2. {r2_tier}:</span> <b style='color:#FB7185;'>{price_fmt(r2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({r2_sc:.0f}/100{f' · {r2_st}' if r2_st else ''})</span>"
     else:
         res2_html = ""
 
-    fut_c2 = getattr(fc_active, "futures_setup", None)
-    if fut_c2 and fut_c2.is_tradeable:
-        c2_target_line = (
-            f"• 🎯 <b>Onaylı Hedef ({fut_c2.direction}):</b> <b style='color:#38BDF8;'>{price_fmt(fut_c2.tp1_price)}</b> ➔ <b style='color:#00E676;'>{price_fmt(fut_c2.tp2_price)}</b> "
-            f"| <b>Stop:</b> <b style='color:#FF5252;'>{price_fmt(fut_c2.stop_price)}</b>"
-        )
-    else:
-        channel_pct = abs((res_val or last_price) - (sup_val or last_price)) / max(last_price, 1e-9) * 100.0
-        c2_target_line = (
-            f"• 📐 <b>Kanal Genişliği:</b> <b>%{channel_pct:.2f}</b> "
-            f"<span style='color:#F59E0B; font-size:11.5px;'>(Risk Kalkanı Aktif: Kırılım Öncesi İşlem/TP Önerilmez)</span>"
-        )
+    channel_pct = abs((res_val or last_price) - (sup_val or last_price)) / max(last_price, 1e-9) * 100.0
+    c2_target_line = (
+        f"• 📐 <b>Kanal Genişliği:</b> <b>%{channel_pct:.2f}</b> "
+        f"<span style='color:#94A3B8; font-size:11.5px;'>(Güçlü ≥62p vs Sıradan &lt;62p)</span>"
+    )
 
     st.markdown(
         f"""
@@ -1235,14 +1235,30 @@ if fut_active is not None:
                 mtf_scores=mtf_scores_fut,
             )
             fut_kb = build_futures_setup_inline_keyboard(active_symbol, active_tf)
-            ok_ftg, msg_ftg = send_telegram_message(
-                tg_token_input,
-                tg_chat_input,
-                fut_msg_html,
-                reply_markup=fut_kb,
+            fut_png = generate_telegram_chart_png(
+                df_active,
+                fc_active,
+                active_symbol,
+                active_tf,
+                include_futures_levels=True,
             )
+            if fut_png:
+                ok_ftg, msg_ftg = send_telegram_photo(
+                    tg_token_input,
+                    tg_chat_input,
+                    fut_png,
+                    caption_html=fut_msg_html,
+                    reply_markup=fut_kb,
+                )
+            else:
+                ok_ftg, msg_ftg = send_telegram_message(
+                    tg_token_input,
+                    tg_chat_input,
+                    fut_msg_html,
+                    reply_markup=fut_kb,
+                )
             if ok_ftg:
-                st.success("✅ Vadeli İşlem Planı Telegram'a gönderildi!")
+                st.success("✅ Vadeli İşlem Planı ve Grafiği Telegram'a gönderildi!")
             else:
                 st.warning(msg_ftg)
 
@@ -1347,10 +1363,10 @@ st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 preset_mode = st.radio(
     "🎛️ Grafik Görünümü Seçin:",
     options=[
-        "✨ Sade Trend & Hedefler (Önerilen)",
+        "✨ Sade Trend & Destek/Direnç (Önerilen)",
         "🧱 Destek, Direnç & Maliyet Odaklı",
         "🧲 Mıknatıs & Likidasyon Odaklı",
-        "🔬 Tüm Katmanları Göster",
+        "🔬 Tüm Katmanlar & Vadeli Hedef Kutusu",
     ],
     index=0,
     horizontal=True,
@@ -1360,7 +1376,7 @@ is_clean = preset_mode.startswith("✨")
 is_sr_focus = preset_mode.startswith("🧱")
 is_smc_focus = preset_mode.startswith("🧲")
 is_all = preset_mode.startswith("🔬")
-default_proj_box = bool((fut_active and fut_active.is_tradeable) or is_all)
+default_proj_box = bool(is_all)
 
 with st.expander("➕ Gelişmiş Detaylar: Tekil Çizgi Ayarları, 5 Kriterli Onay Listesi, Kasa Planı & Faktör Grafiği", expanded=False):
     chk_c1, chk_c2, chk_c3, chk_c4 = st.columns(4)

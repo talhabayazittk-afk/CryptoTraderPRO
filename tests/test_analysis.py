@@ -162,22 +162,27 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         )
         curr_p = float(df["close"].iloc[-1])
 
+        # Default timeframe in config must be 4h
+        self.assertEqual(self.config.exchange.timeframe, "4h")
+
         # v8.4 Support vs Strong Support & Resistance vs Strong Resistance verification
         self.assertGreaterEqual(len(fc.support_levels), 1)
         self.assertGreaterEqual(len(fc.resistance_levels), 1)
-        self.assertIn(fc.nearest_support_tier_tr, ("🟢 Destek", "🛡️ Güçlü Destek"))
-        self.assertIn(fc.nearest_resistance_tier_tr, ("🔴 Direnç", "🧱 Güçlü Direnç"))
-        self.assertGreaterEqual(fc.nearest_support_score, 25.0)
+        self.assertIn(fc.nearest_support_tier_tr, ("🟢 Sıradan Destek", "🛡️ Güçlü Destek"))
+        self.assertIn(fc.nearest_resistance_tier_tr, ("🔴 Sıradan Direnç", "🧱 Güçlü Direnç"))
+        self.assertGreaterEqual(fc.nearest_support_score, 20.0)
         self.assertLessEqual(fc.nearest_support_score, 98.0)
-        self.assertGreaterEqual(fc.nearest_resistance_score, 25.0)
+        self.assertGreaterEqual(fc.nearest_resistance_score, 20.0)
         self.assertLessEqual(fc.nearest_resistance_score, 98.0)
         for sl in fc.support_levels:
-            self.assertIn(sl.tier_tr, ("🟢 Destek", "🛡️ Güçlü Destek"))
-            self.assertGreaterEqual(sl.strength_score, 25.0)
+            self.assertIn(sl.tier_tr, ("🟢 Sıradan Destek", "🛡️ Güçlü Destek"))
+            self.assertEqual(sl.is_strong, sl.strength_score >= 62.0)
+            self.assertGreaterEqual(sl.strength_score, 20.0)
             self.assertTrue(len(sl.confluence_tags) >= 1)
         for rl in fc.resistance_levels:
-            self.assertIn(rl.tier_tr, ("🔴 Direnç", "🧱 Güçlü Direnç"))
-            self.assertGreaterEqual(rl.strength_score, 25.0)
+            self.assertIn(rl.tier_tr, ("🔴 Sıradan Direnç", "🧱 Güçlü Direnç"))
+            self.assertEqual(rl.is_strong, rl.strength_score >= 62.0)
+            self.assertGreaterEqual(rl.strength_score, 20.0)
             self.assertTrue(len(rl.confluence_tags) >= 1)
 
         # v8.0 Perpetual Futures (Vadeli İşlemler) Radar & Confidence Engine verification
@@ -206,28 +211,26 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         tg_msg = format_forecast_telegram_html(
             fc,
             symbol="ETH/USDT",
-            timeframe="1h",
+            timeframe="4h",
             current_price=curr_p,
             mtf_scores={"15M": -20.0, "1H": fc.score, "4H": -35.0, "1D": -30.0},
         )
-        self.assertIn("MEVCUT TREND &amp; KIRILIMLAR", tg_msg)
-        self.assertIn("DESTEK &amp; DİRENÇ MİMARİSİ", tg_msg)
-        self.assertIn("PARA GİRİŞ / ÇIKIŞI &amp; BALİNALAR", tg_msg)
-        self.assertIn("MIKNATIS (POC) &amp; TASFİYE BÖLGELERİ", tg_msg)
-        self.assertIn("VADELİ İŞLEM RADARI", tg_msg)
-        self.assertIn("Son 20 Mum Nakit", tg_msg)
-        self.assertIn("Dip Alıcı Maliyeti", tg_msg)
-        self.assertIn("Zaman Dilimleri", tg_msg)
+        # Concise summary checks & no Futures TP/Stop in general analysis
+        self.assertLess(len(tg_msg), 1020)
+        self.assertIn("DESTEK &amp; DİRENÇ SINIFLANDIRMASI", tg_msg)
+        self.assertIn("PARA AKIŞI &amp; MIKNATIS", tg_msg)
+        self.assertNotIn("TP1:", tg_msg)
+        self.assertNotIn("Zarar-Kes (Stop):", tg_msg)
 
         fut_tg_msg = format_futures_setup_telegram_html(
             fc=fc,
             symbol="ETH/USDT",
-            timeframe="1H",
+            timeframe="4H",
             current_price=curr_p,
             mtf_scores={"15M": -20.0, "1H": fc.score, "4H": -35.0, "1D": -30.0},
         )
-        self.assertIn("VADELİ İŞLEMLER (FUTURES)", fut_tg_msg)
-        self.assertIn("Vadeli Güven Notu", fut_tg_msg)
+        self.assertIn("VADELİ İŞLEM PLANI", fut_tg_msg)
+        self.assertIn("Güven:", fut_tg_msg)
 
         radar_tg_msg = format_futures_radar_scan_telegram_html(
             [
@@ -237,32 +240,39 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
                     "fc": fc,
                 }
             ],
-            timeframe="1H",
+            timeframe="4H",
         )
         self.assertIn("VADELİ İŞLEMLER (FUTURES) KURULUM &amp; GÜVEN RADARI", radar_tg_msg)
         self.assertIn("İŞLEME UYGUN VADELİ KURULUMLAR", radar_tg_msg)
         self.assertIn("RİSKLİ / İŞLEM TAVSİYE EDİLMEYENLER", radar_tg_msg)
 
-        kb_an = build_analysis_inline_keyboard("ETH/USDT", "1H")
+        kb_an = build_analysis_inline_keyboard("ETH/USDT")
         self.assertEqual(len(kb_an["inline_keyboard"]), 5)
-        kb_fut = build_futures_setup_inline_keyboard("ETH/USDT", "1H")
+        self.assertIn(":4H", kb_an["inline_keyboard"][1][0]["callback_data"])
+        kb_fut = build_futures_setup_inline_keyboard("ETH/USDT")
         self.assertEqual(len(kb_fut["inline_keyboard"]), 4)
-        kb_fut_rad = build_futures_radar_inline_keyboard([{"symbol": "ETH/USDT", "price": curr_p, "fc": fc}], "1H")
+        self.assertIn("fut_chart:ETH/USDT:4H", kb_fut["inline_keyboard"][1][1]["callback_data"])
+        kb_fut_rad = build_futures_radar_inline_keyboard([{"symbol": "ETH/USDT", "price": curr_p, "fc": fc}])
         self.assertGreaterEqual(len(kb_fut_rad["inline_keyboard"]), 3)
         kb_main = build_main_reply_keyboard()
         self.assertEqual(len(kb_main["keyboard"]), 2)
-        kb_coins = build_coin_list_inline_keyboard(["BTC/USDT", "ETH/USDT", "ONDO/USDT"], "1H")
+        self.assertEqual(kb_main["keyboard"][1][0]["text"], "🚀 Tümünü Tara (4H)")
+        kb_coins = build_coin_list_inline_keyboard(["BTC/USDT", "ETH/USDT", "ONDO/USDT"])
         self.assertGreaterEqual(len(kb_coins["inline_keyboard"]), 3)
 
-        liq_msg = format_liquidation_magnet_telegram_html("ETH/USDT", {"1H": fc}, curr_p)
+        liq_msg = format_liquidation_magnet_telegram_html("ETH/USDT", {"4H": fc}, curr_p)
         self.assertIn("MIKNATIS FİYAT &amp; LİKİDASYON HARİTASI", liq_msg)
 
-        kasa_msg = format_position_size_telegram_html(fc, "ETH/USDT", "1H", curr_p, capital_usd=1000.0)
+        kasa_msg = format_position_size_telegram_html(fc, "ETH/USDT", "4H", curr_p, capital_usd=1000.0)
         self.assertIn("KASA &amp; RİSK YÖNETİMİ PLANI", kasa_msg)
 
-        png_bytes = generate_telegram_chart_png(df, fc, "ETH/USDT", "1H")
+        png_bytes = generate_telegram_chart_png(df, fc, "ETH/USDT", "4H", include_futures_levels=False)
         self.assertIsNotNone(png_bytes)
         self.assertTrue(png_bytes.startswith(b"\x89PNG"))
+
+        png_fut_bytes = generate_telegram_chart_png(df, fc, "ETH/USDT", "4H", include_futures_levels=True)
+        self.assertIsNotNone(png_fut_bytes)
+        self.assertTrue(png_fut_bytes.startswith(b"\x89PNG"))
 
         visualizer = InteractiveChartVisualizer(self.config)
         fig = visualizer.create_figure(df, exchange_source="TEST", forecast=fc, show_kalman_avwap=True, show_vpvr=True)

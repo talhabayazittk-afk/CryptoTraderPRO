@@ -30,7 +30,7 @@ class SupportResistanceLevel:
     strength_label: str
     is_strong: bool = False
     strength_score: float = 40.0
-    tier_tr: str = "Destek"  # "🛡️ Güçlü Destek", "🟢 Destek", "🧱 Güçlü Direnç", "🔴 Direnç"
+    tier_tr: str = "🟢 Sıradan Destek"  # "🛡️ Güçlü Destek", "🟢 Sıradan Destek", "🧱 Güçlü Direnç", "🔴 Sıradan Direnç"
     confluence_tags: List[str] = field(default_factory=list)
     htf_confirmed: bool = False
     htf_tag_tr: str = ""
@@ -183,11 +183,11 @@ class MarketForecast:
     fib_618_price: float = 0.0
     nearest_support: Optional[float] = None
     nearest_resistance: Optional[float] = None
-    nearest_support_tier_tr: str = "🟢 Destek"
-    nearest_support_score: float = 45.0
+    nearest_support_tier_tr: str = "🟢 Sıradan Destek"
+    nearest_support_score: float = 42.0
     nearest_support_reason_tr: str = ""
-    nearest_resistance_tier_tr: str = "🔴 Direnç"
-    nearest_resistance_score: float = 45.0
+    nearest_resistance_tier_tr: str = "🔴 Sıradan Direnç"
+    nearest_resistance_score: float = 42.0
     nearest_resistance_reason_tr: str = ""
     strongest_support: Optional[float] = None
     strongest_resistance: Optional[float] = None
@@ -998,33 +998,30 @@ class SignalEngine:
                     ):
                         htf_confirmed = True
                         htf_tag_tr = "🏛️ Üst Periyot (4H/1D) Duvar Onaylı"
-                        score_pts += 18.0
+                        score_pts += 20.0
                         conf_reasons.append("🏛️ Üst Periyot Duvarı")
                         break
 
-            eff_touches = max(pivot_touches, min((rejection_bars + 1) // 2, 5), 1 if rejection_bars > 0 else 0)
-            if eff_touches >= 3:
-                score_pts += 46.0
-                conf_reasons.append(f"{eff_touches} Mum Tepkisi")
-            elif eff_touches == 2:
-                score_pts += 34.0
-                conf_reasons.append("2 Mum Tepkisi")
-            elif eff_touches == 1:
+            distinct_tests = max(pivot_touches, win_episodes)
+            eff_touches = max(distinct_tests, 1 if rejection_bars > 0 else 0)
+            if distinct_tests >= 3:
+                score_pts += 32.0
+                conf_reasons.append(f"{distinct_tests} Kez Onaylı Test")
+            elif distinct_tests == 2:
                 score_pts += 22.0
-                conf_reasons.append("Onaylı Pivot" if pivot_touches > 0 else "Mum Tepkisi")
+                conf_reasons.append("2 Kez Test Edildi")
+            elif distinct_tests == 1:
+                score_pts += 12.0
+                conf_reasons.append("Tekil Pivot" if pivot_touches > 0 else "Ara Tepki")
             else:
-                score_pts += 16.0
-
-            if reaction_count >= 2 and reaction_rate_pct >= 70.0:
-                score_pts += 6.0
-
-            if "Yakın Pivot" in c_tags or recent_rejection_bars >= 2:
-                score_pts += 10.0
-                if "Güncel Mum Testi" not in conf_reasons and len(conf_reasons) < 3:
-                    conf_reasons.append("Güncel Mum Testi")
-
-            if max_wick_atr >= 0.45:
                 score_pts += 8.0
+                conf_reasons.append("Ara Seviye")
+
+            if win_episodes >= 2 and reaction_rate_pct >= 70.0:
+                score_pts += 8.0
+
+            if max_wick_atr >= 0.65:
+                score_pts += 6.0
                 conf_reasons.append("Güçlü İğne Reddi")
 
             if "Ana Tepe/Dip" in c_tags:
@@ -1032,42 +1029,39 @@ class SignalEngine:
                 if "Ana Dip/Tepe" not in conf_reasons:
                     conf_reasons.append("Ana Dip/Tepe")
             if "Hacim POC" in c_tags:
-                score_pts += 24.0
+                score_pts += 18.0
                 conf_reasons.append("Hacim Mıknatısı (POC)")
             elif "Hacim VAL" in c_tags or "Hacim VAH" in c_tags:
-                score_pts += 14.0
+                score_pts += 10.0
                 conf_reasons.append("Hacim Kanal Sınırı")
             if "Dip Maliyet (AVWAP)" in c_tags or "Tepe Maliyet (AVWAP)" in c_tags:
-                score_pts += 18.0
+                score_pts += 14.0
                 conf_reasons.append("Kurumsal Maliyet (AVWAP)")
             if "EMA 200" in c_tags:
-                score_pts += 18.0
+                score_pts += 14.0
                 conf_reasons.append("EMA 200")
             if "Balina OB" in c_tags:
-                score_pts += 22.0
+                score_pts += 16.0
                 conf_reasons.append("Balina Emir Kutusu")
             if "Alış Duvarı" in c_tags or "Satış Duvarı" in c_tags:
-                score_pts += 20.0
+                score_pts += 16.0
                 conf_reasons.append("Canlı Borsa Duvarı")
             if "Fib 0.618" in c_tags:
-                score_pts += 15.0
+                score_pts += 12.0
                 conf_reasons.append("Altın Oran (Fib 0.618)")
             elif "Fib 0.382" in c_tags:
-                score_pts += 9.0
+                score_pts += 7.0
                 conf_reasons.append("Fib 0.382")
-            if local_vol_ratio >= 1.25:
-                score_pts += 12.0
+            if local_vol_ratio >= 1.30:
+                score_pts += 8.0
                 conf_reasons.append(f"Yüksek Hacim ({local_vol_ratio:.1f}x)")
 
             strength_score = float(np.clip(score_pts, 25.0, 98.0))
-            if (len(conf_reasons) >= 3 and eff_touches >= 2) or htf_confirmed:
-                if strength_score < 58.0:
-                    strength_score = 58.0
-            is_strong = strength_score >= 58.0
-            short_reasons = " + ".join(conf_reasons[:2]) if conf_reasons else "Teknik Seviye"
+            is_strong = strength_score >= 62.0
+            short_reasons = " + ".join(conf_reasons[:2]) if conf_reasons else "Ara Seviye"
 
             if is_support_side:
-                tier_tr = "🛡️ Güçlü Destek" if is_strong else "🟢 Destek"
+                tier_tr = "🛡️ Güçlü Destek" if is_strong else "🟢 Sıradan Destek"
                 strength_lbl = f"{tier_tr} (Güç: {strength_score:.0f}/100 • {short_reasons})"
                 raw_supports.append(
                     SupportResistanceLevel(
@@ -1091,7 +1085,7 @@ class SignalEngine:
                     )
                 )
             else:
-                tier_tr = "🧱 Güçlü Direnç" if is_strong else "🔴 Direnç"
+                tier_tr = "🧱 Güçlü Direnç" if is_strong else "🔴 Sıradan Direnç"
                 strength_lbl = f"{tier_tr} (Güç: {strength_score:.0f}/100 • {short_reasons})"
                 raw_resistances.append(
                     SupportResistanceLevel(
@@ -1152,12 +1146,12 @@ class SignalEngine:
                     band_high=ext_p + zone_half_width,
                     level_type="DESTEK",
                     touches=1,
-                    strength_label="🟢 Destek (Güç: 42/100 • Alt Kanal ATR Uzatması)",
+                    strength_label="🟢 Sıradan Destek (Güç: 35/100 • Alt Kanal ATR Uzatması)",
                     is_strong=False,
-                    strength_score=42.0,
-                    tier_tr="🟢 Destek",
+                    strength_score=35.0,
+                    tier_tr="🟢 Sıradan Destek",
                     confluence_tags=["Alt Kanal ATR Uzatması"],
-                    stats_summary_tr="Volatilite Uzatma Hedefi",
+                    stats_summary_tr="Volatilite Uzatma Seviyesi",
                 )
             )
 
@@ -1171,12 +1165,12 @@ class SignalEngine:
                     band_high=ext_p + zone_half_width,
                     level_type="DİRENÇ",
                     touches=1,
-                    strength_label="🔴 Direnç (Güç: 42/100 • Üst Kanal ATR Uzatması)",
+                    strength_label="🔴 Sıradan Direnç (Güç: 35/100 • Üst Kanal ATR Uzatması)",
                     is_strong=False,
-                    strength_score=42.0,
-                    tier_tr="🔴 Direnç",
+                    strength_score=35.0,
+                    tier_tr="🔴 Sıradan Direnç",
                     confluence_tags=["Üst Kanal ATR Uzatması"],
-                    stats_summary_tr="Volatilite Uzatma Hedefi",
+                    stats_summary_tr="Volatilite Uzatma Seviyesi",
                 )
             )
 
@@ -1708,11 +1702,11 @@ class SignalEngine:
         )
         nearest_sup = supports[0].price if supports else (live_close - 2.0 * atr_val)
         nearest_res = resistances[0].price if resistances else (live_close + 2.0 * atr_val)
-        sup_tier_tr = supports[0].tier_tr if supports else "🟢 Destek"
-        sup_score = supports[0].strength_score if supports else 42.0
+        sup_tier_tr = supports[0].tier_tr if supports else "🟢 Sıradan Destek"
+        sup_score = supports[0].strength_score if supports else 35.0
         sup_reason_tr = " + ".join(supports[0].confluence_tags[:2]) if (supports and supports[0].confluence_tags) else "Ara Pivot"
-        res_tier_tr = resistances[0].tier_tr if resistances else "🔴 Direnç"
-        res_score = resistances[0].strength_score if resistances else 42.0
+        res_tier_tr = resistances[0].tier_tr if resistances else "🔴 Sıradan Direnç"
+        res_score = resistances[0].strength_score if resistances else 35.0
         res_reason_tr = " + ".join(resistances[0].confluence_tags[:2]) if (resistances and resistances[0].confluence_tags) else "Ara Pivot"
         strongest_sup_obj = max(supports, key=lambda x: x.strength_score) if supports else None
         strongest_res_obj = max(resistances, key=lambda x: x.strength_score) if resistances else None
@@ -2389,13 +2383,13 @@ class SignalEngine:
         dist_to_sup_pct = max((live_close - sup_safe) / max(live_close, 1e-9) * 100.0, 0.05)
         dist_to_res_pct = max((res_safe - live_close) / max(live_close, 1e-9) * 100.0, 0.05)
 
-        sup1_tier = supports[0].tier_tr if supports else "🟢 Destek"
+        sup1_tier = supports[0].tier_tr if supports else "🟢 Sıradan Destek"
         sup1_strong = bool(supports[0].is_strong) if supports else False
-        sup1_score = float(supports[0].strength_score) if supports else 45.0
+        sup1_score = float(supports[0].strength_score) if supports else 35.0
         sup1_htf = bool(getattr(supports[0], "htf_confirmed", False)) if supports else False
-        res1_tier = resistances[0].tier_tr if resistances else "🔴 Direnç"
+        res1_tier = resistances[0].tier_tr if resistances else "🔴 Sıradan Direnç"
         res1_strong = bool(resistances[0].is_strong) if resistances else False
-        res1_score = float(resistances[0].strength_score) if resistances else 45.0
+        res1_score = float(resistances[0].strength_score) if resistances else 35.0
         res1_htf = bool(getattr(resistances[0], "htf_confirmed", False)) if resistances else False
 
         entry_price = live_close

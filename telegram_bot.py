@@ -54,6 +54,7 @@ from src.telegram_notifier import (
     build_main_reply_keyboard,
     build_screener_inline_keyboard,
     edit_telegram_message,
+    edit_telegram_photo_message,
     format_forecast_telegram_html,
     format_futures_radar_scan_telegram_html,
     format_futures_setup_telegram_html,
@@ -73,7 +74,7 @@ from src.telegram_notifier import (
 )
 
 
-def _bot_fallback_build_breakout_radar_kb(entries: List[Dict[str, Any]], timeframe: str = "1H") -> Dict[str, Any]:
+def _bot_fallback_build_breakout_radar_kb(entries: List[Dict[str, Any]], timeframe: str = "4H") -> Dict[str, Any]:
     tf_up = timeframe.upper()
     tf_row = [
         {"text": f"✅ {t}" if t == tf_up else f"🚨 {t}", "callback_data": f"brk_scan:{t}"}
@@ -94,7 +95,7 @@ def _bot_fallback_build_breakout_radar_kb(entries: List[Dict[str, Any]], timefra
     return {"inline_keyboard": rows}
 
 
-def _bot_fallback_format_breakout_radar_html(entries: List[Dict[str, Any]], timeframe: str = "1H") -> str:
+def _bot_fallback_format_breakout_radar_html(entries: List[Dict[str, Any]], timeframe: str = "4H") -> str:
     tf_up = timeframe.upper()
     lines = [
         f"🚨 <b>DESTEK / DİRENÇ KIRILIM RADARI [{tf_up}]</b>",
@@ -192,7 +193,7 @@ CACHE_TTL_SEC = 45.0
 
 def _compute_full_coin_bundle(
     symbol: str,
-    timeframe: str = "1h",
+    timeframe: str = "4h",
     allow_synthetic_fallback: bool = False,
     force_refresh: bool = False,
     _is_btc_internal: bool = False,
@@ -204,7 +205,7 @@ def _compute_full_coin_bundle(
     for 45 seconds so button switches are instantaneous, and returns:
       (df_active, fc_active, tf_forecasts, mtf_scores, current_price)
     """
-    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
+    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "4h"
     tf_key = tf.upper()
     sym_key = symbol.upper()
     ex_choice = str(load_telegram_state().get("primary_exchange", "binance")).lower()
@@ -308,11 +309,11 @@ def _compute_full_coin_bundle(
 
 def _analyze_single_coin(
     symbol: str,
-    timeframe: str = "1h",
+    timeframe: str = "4h",
     force_refresh: bool = False,
 ) -> Tuple[str, Dict[str, Any], pd.DataFrame, MarketForecast, float]:
     """Returns (html_text, inline_keyboard, df_active, fc_active, current_price)."""
-    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
+    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "4h"
     tf_key = tf.upper()
     df_active, fc_active, _, mtf_scores, current_price = _compute_full_coin_bundle(
         symbol,
@@ -328,6 +329,42 @@ def _analyze_single_coin(
     )
     kb = build_analysis_inline_keyboard(symbol, tf_key)
     return html_text, kb, df_active, fc_active, current_price
+
+
+def _send_or_update_analysis_with_chart(
+    bot_token: str,
+    chat_id: str,
+    df_act: pd.DataFrame,
+    fc_act: MarketForecast,
+    symbol: str,
+    timeframe: str,
+    html_text: str,
+    kb: Dict[str, Any],
+    include_futures_levels: bool = False,
+    msg_id: int = 0,
+    is_photo_msg: bool = False,
+) -> None:
+    """
+    Guarantees every Telegram analysis output (General or Futures) is delivered WITH its chart image.
+    If triggered from an inline button on an existing photo message, updates the photo + caption in-place.
+    """
+    png_b = generate_telegram_chart_png(
+        df_act,
+        fc_act,
+        symbol,
+        timeframe.upper(),
+        include_futures_levels=include_futures_levels,
+    )
+    if png_b:
+        if is_photo_msg and msg_id:
+            if edit_telegram_photo_message(bot_token, chat_id, msg_id, png_b, caption_html=html_text, reply_markup=kb):
+                return
+        send_telegram_photo(bot_token, chat_id, png_b, caption_html=html_text, reply_markup=kb)
+    else:
+        if not is_photo_msg and msg_id:
+            if edit_telegram_message(bot_token, chat_id, msg_id, html_text, reply_markup=kb):
+                return
+        send_telegram_message(bot_token, chat_id, html_text, reply_markup=kb)
 
 
 def _analyze_single_coin_for_scan(
@@ -393,7 +430,7 @@ def _analyze_single_coin_for_scan(
 
 
 def _scan_watchlist_parallel(
-    timeframe: str = "1h",
+    timeframe: str = "4h",
     only_high_quality: bool = False,
     force_refresh: bool = False,
 ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
@@ -402,7 +439,7 @@ def _scan_watchlist_parallel(
     incorporating BTC macro context, caches raw results for 45s so filter/market
     switches are instant, and returns (html_text, inline_keyboard, raw_results).
     """
-    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "1h"
+    tf = timeframe.lower() if timeframe.lower() in ("15m", "1h", "4h", "1d") else "4h"
     now_t = time.time()
     results: Optional[List[Dict[str, Any]]] = None
 
@@ -467,7 +504,7 @@ def _build_alarm_radar_status_html(state: Dict[str, Any]) -> str:
     lines = [
         "⏰ <b>AKILLI ALARM &amp; 7/24 RADAR MERKEZİ</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📡 <b>7/24 Kırılım &amp; Balina Radarı:</b> {'🟢 <b>AÇIK</b> (Otomatik Tarama Aktif)' if radar_on else '🔴 <b>KAPALI</b>'}",
+        f"📡 <b>7/24 Kırılım &amp; Balina Radarı (4H):</b> {'🟢 <b>AÇIK</b> (Otomatik Tarama Aktif)' if radar_on else '🔴 <b>KAPALI</b>'}",
         f"🌅 <b>Otomatik Seans Özeti (09:00 &amp; 16:30):</b> {'🟢 <b>AÇIK</b>' if sess_on else '⚪ <b>KAPALI</b>'}",
         "",
         f"🔔 <b>AKTİF FİYAT ALARMLARINIZ ({len(alarms)} Adet):</b>",
@@ -487,7 +524,7 @@ def _build_alarm_radar_status_html(state: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_kasa_inline_keyboard(symbol: str, tf_up: str, active_cap: float) -> Dict[str, Any]:
+def _build_kasa_inline_keyboard(symbol: str, tf_up: str = "4H", active_cap: float = 1000.0) -> Dict[str, Any]:
     caps = [500, 1000, 2500, 5000]
     cap_row = []
     for c in caps:
@@ -497,7 +534,7 @@ def _build_kasa_inline_keyboard(symbol: str, tf_up: str, active_cap: float) -> D
         "inline_keyboard": [
             cap_row,
             [
-                {"text": "📊 4 Kart Analize Dön", "callback_data": f"an:{symbol}:{tf_up}"},
+                {"text": "📊 Özet Analize Dön", "callback_data": f"an:{symbol}:{tf_up}"},
                 {"text": "🖼️ Grafik Gönder", "callback_data": f"chart:{symbol}:{tf_up}"},
             ],
         ]
@@ -506,30 +543,29 @@ def _build_kasa_inline_keyboard(symbol: str, tf_up: str, active_cap: float) -> D
 
 def _build_help_html(chat_id: str) -> str:
     return (
-        "👋 <b>Akıllı Kripto Karar-Destek &amp; Kırılım Radarı Terminali (v9.4)</b>\n"
+        "👋 <b>Akıllı Kripto Karar-Destek &amp; Kırılım Radarı Terminali (Varsayılan: 4H)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Artık yazı yazmanıza gerek kalmadan <b>ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
         "🚨 <b>Destek / Direnç Kırılım &amp; Tuzak (SFP) Radarı:</b>\n"
-        "• <code>/kirilim 1h</code> — <b>Direnç Kırılımı Geldi</b>, <b>Destek Kırılımı Geldi</b>, <b>Sahte Kırılım (Tuzak)</b> ve <b>Retest</b> onaylarını + 'Kırılım Nasıl Olur?' şartlarını listeler\n\n"
+        "• <code>/kirilim 4h</code> — <b>Direnç Kırılımı Geldi</b>, <b>Destek Kırılımı Geldi</b>, <b>Sahte Kırılım (Tuzak)</b> ve <b>Retest</b> onaylarını listeler\n\n"
         "⚡ <b>Vadeli İşlemler (Futures) Kurulum &amp; Güven Radarı:</b>\n"
-        "• <code>/vadeli ONDO 1h</code> — Destek/Direnç, R:R ve Güven Notuna (0-100) Göre Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı (Riskliyse İşlem Önermez!)\n"
-        "• <code>/vadelitara 1h</code> — Tüm Coinleri Tarar, Sadece Güvenli Vadeli Kurulumları ve Riskli/Reddedilenleri Ayırır\n\n"
-        "📲 <b>Temel Sorgu &amp; Grafik Komutları:</b>\n"
-        "• <code>ONDO</code> veya <code>ONDO 4h</code> — 4 Kartlı Detaylı Analiz + Dokunmatik Butonlar\n"
-        "• <code>/grafik ONDO 1h</code> — Destek, Direnç, Kırılım Rozeti, Mıknatıs ve Hedef Çizgili Grafik Görseli\n"
+        "• <code>/vadeli ONDO 4h</code> — Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı + Vadeli Grafik\n"
+        "• <code>/vadelitara 4h</code> — Tüm Coinleri Tarar, Güvenli Vadeli Kurulumları Ayırır\n\n"
+        "📲 <b>Temel Sorgu &amp; Grafik Komutları (Varsayılan: 4H):</b>\n"
+        "• <code>ONDO</code> veya <code>ONDO 4h</code> — Grafik + Kısa &amp; Öz Analiz (Güçlü vs Sıradan Destek/Direnç)\n"
+        "• <code>/grafik ONDO 4h</code> — Destek/Direnç Sınıflandırmalı Grafik Görseli\n"
         "• <code>/miknatis ONDO</code> — 15M/1H/4H/1D Mıknatıs (POC) &amp; Likidasyon Haritası\n"
         "• <code>/kasa ONDO 1000</code> — Stop Mesafesine Göre Kasa &amp; Risk Hesaplayıcı\n\n"
         "🚀 <b>Tarama &amp; Küresel Piyasa Komutları:</b>\n"
-        "• <code>/tara 1h</code> — İzleme Listesini Paralel Tarar (Butonlu Seçim)\n"
-        "• <code>/firsat 1h</code> — Sadece Güçlü Kurulum &amp; Balina Fırsatlarını Filtreler\n"
+        "• <code>/tara 4h</code> — İzleme Listesini 4H Diliminde Paralel Tarar\n"
+        "• <code>/firsat 4h</code> — Sadece Güçlü Kurulum &amp; Balina Fırsatlarını Filtreler\n"
         "• <code>/piyasa</code> veya <code>/nakit</code> — Küresel Para Giriş/Çıkışı &amp; Seans Özeti\n\n"
         "⏰ <b>Alarm, Radar &amp; Liste Yönetimi:</b>\n"
         "• <code>/alarm ONDO 0.3620</code> — Hedef Fiyata Anlık Bildirim Alarmı Kurar\n"
         "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n"
-        "• <code>/liste</code> — Tıklanabilir Coin Seçim Menüsü\n"
-        "• <code>/ekle PEPE</code> | <code>/cikar PEPE</code> — İzleme Listesini Düzenler\n"
+        "• <code>/liste</code> — Tıklanabilir Coin Seçim Menüsü (4H)\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>Chat ID:</b> <code>{chat_id}</code> | 🌐 <b>Erişim:</b> Herkese Açık"
+        f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>"
     )
 
 
@@ -574,16 +610,16 @@ def _check_price_alarms(bot_token: str, chat_id: str) -> None:
                 f"• 🎯 <b>Alarm Seviyesi:</b> <code>{format(target_p, p_fmt)} USDT</code> ({a.get('note', '')})\n"
                 f"• 💰 <b>Anlık Fiyat:</b> <code>{format(curr_p, p_fmt)} USDT</code> (<b>{dir_txt}</b>)\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "<i>👇 Güncel kırılım, para girişi ve yeni hedefleri görmek için dokunun:</i>"
+                "<i>👇 Güncel 4H grafik ve analizi görmek için dokunun:</i>"
             )
             kb = {
                 "inline_keyboard": [
                     [
-                        {"text": f"📊 {sym} (15M) Analiz", "callback_data": f"an:{sym}:15M"},
+                        {"text": f"📊 {sym} (4H) Analiz", "callback_data": f"an:{sym}:4H"},
                         {"text": f"📊 {sym} (1H) Analiz", "callback_data": f"an:{sym}:1H"},
                     ],
                     [
-                        {"text": f"🖼️ {sym} Grafik Gönder", "callback_data": f"chart:{sym}:1H"},
+                        {"text": f"🖼️ {sym} (4H) Grafik", "callback_data": f"chart:{sym}:4H"},
                     ],
                 ]
             }
@@ -600,13 +636,8 @@ def _check_price_alarms(bot_token: str, chat_id: str) -> None:
 
 def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False) -> int:
     """
-    Scans watchlist in parallel and alerts on high-conviction events:
-      - Support / Resistance Breakout (BULL_SR_BREAKOUT, BEAR_SR_BREAKDOWN) & Dynamic Trendline Breakout
-      - Wick Fakeout / Liquidity Trap (BULL_SFP, BEAR_SFP) & Confirmed Retest (BULL_RETEST, BEAR_RETEST)
-      - Readiness >= 4/5 with strong directional conviction
-      - Strong Whale Accumulation (>= 70/100) or Distribution (<= 30/100)
-      - High Volatility Squeeze (>= 80%)
-    Respects a 2-hour per-coin cooldown unless force=True.
+    Scans watchlist in parallel on 4H default timeframe and alerts on high-conviction events
+    with a mandatory chart PNG (without futures TP/Stop lines).
     """
     state = load_telegram_state()
     if not force and not state.get("radar_enabled", True):
@@ -614,7 +645,7 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
     if not chat_id:
         return 0
 
-    _, _, results = _scan_watchlist_parallel("1h", only_high_quality=False)
+    _, _, results = _scan_watchlist_parallel("4h", only_high_quality=False)
     cooldowns: Dict[str, float] = state.get("radar_cooldowns", {})
     now_ts = time.time()
     alerts_sent = 0
@@ -629,86 +660,78 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
         reasons: List[str] = []
         sr_act = getattr(fc, "sr_action_type", "NONE")
         sr_status_tr = getattr(fc, "sr_action_status_tr", "")
-        sr_guide_tr = getattr(fc, "sr_breakout_guide_tr", "")
         tl_rep = getattr(fc, "trendlines", None)
         tl_brk = getattr(tl_rep, "breakout_status", "NONE") if tl_rep else "NONE"
         tl_sum = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
 
-        is_breakout_event = False
-        header_title = f"📡 <b>OTOMATİK RADAR UYARISI: {sym} [1H]</b>"
+        header_title = f"📡 <b>RADAR UYARISI: {sym} [4H]</b>"
 
         if sr_act == "BULL_SR_BREAKOUT":
-            is_breakout_event = True
-            header_title = f"🚀 <b>DİRENÇ KIRILIMI GELDİ: {sym} [1H]</b>"
+            header_title = f"🚀 <b>DİRENÇ KIRILIMI GELDİ: {sym} [4H]</b>"
             reasons.append(f"🚀 <b>Kırılım Onayı:</b> {sr_status_tr}")
         elif sr_act == "BEAR_SR_BREAKDOWN":
-            is_breakout_event = True
-            header_title = f"🩸 <b>DESTEK KIRILIMI GELDİ: {sym} [1H]</b>"
+            header_title = f"🩸 <b>DESTEK KIRILIMI GELDİ: {sym} [4H]</b>"
             reasons.append(f"🩸 <b>Kırılım Onayı:</b> {sr_status_tr}")
         elif sr_act in ("BULL_SFP", "BEAR_SFP"):
-            is_breakout_event = True
-            header_title = f"🪤 <b>SAHTE KIRILIM (TUZAK / SFP) UYARISI: {sym} [1H]</b>"
+            header_title = f"🪤 <b>SAHTE KIRILIM (TUZAK / SFP): {sym} [4H]</b>"
             reasons.append(f"🪤 <b>Tuzak Tespit Edildi:</b> {sr_status_tr}")
         elif sr_act in ("BULL_RETEST", "BEAR_RETEST"):
-            is_breakout_event = True
-            header_title = f"🔄 <b>KIRILIM SONRASI RETEST ONAYI: {sym} [1H]</b>"
+            header_title = f"🔄 <b>KIRILIM SONRASI RETEST: {sym} [4H]</b>"
             reasons.append(f"🔄 <b>Retest Onayı:</b> {sr_status_tr}")
 
         if tl_brk in ("BULL_BREAKOUT", "BEAR_BREAKDOWN"):
-            is_breakout_event = True
             if sr_act == "NONE":
                 header_title = (
-                    f"📐 <b>DÜŞEN TREND KIRILIMI GELDİ: {sym} [1H]</b>"
+                    f"📐 <b>DÜŞEN TREND KIRILIMI: {sym} [4H]</b>"
                     if tl_brk == "BULL_BREAKOUT"
-                    else f"📐 <b>YÜKSELEN TREND KIRILIMI GELDİ: {sym} [1H]</b>"
+                    else f"📐 <b>YÜKSELEN TREND KIRILIMI: {sym} [4H]</b>"
                 )
-            reasons.append(f"📐 <b>Dinamik Trend Kırılımı:</b> {tl_sum}")
+            reasons.append(f"📐 <b>Trend Kırılımı:</b> {tl_sum}")
 
         if fc.readiness_score_5 >= 4 and abs(fc.score) >= 22:
             tr_txt = "YÜKSELİŞ" if fc.score > 0 else "DÜŞÜŞ"
-            reasons.append(f"🚦 <b>Güçlü {tr_txt} Kurulumu:</b> Hazırlık <b>{fc.readiness_score_5}/5</b> (Puan: {fc.score:+.0f}/100)")
+            reasons.append(f"🚦 <b>Güçlü {tr_txt} Kurulumu:</b> Hazırlık <b>{fc.readiness_score_5}/5</b> ({fc.score:+.0f}/100)")
         if fc.whale_accumulation_score >= 70:
-            reasons.append(f"🐋 <b>Güçlü Balina Toplaması:</b> Balina Skoru <b>{fc.whale_accumulation_score:.0f}/100</b> (Nakit: {r['delta_str']})")
+            reasons.append(f"🐋 <b>Balina Toplaması:</b> <b>{fc.whale_accumulation_score:.0f}/100</b> (Nakit: {r['delta_str']})")
         elif fc.whale_accumulation_score <= 30:
-            reasons.append(f"🐋 <b>Güçlü Balina Satışı / Çıkışı:</b> Balina Skoru <b>{fc.whale_accumulation_score:.0f}/100</b> (Nakit: {r['delta_str']})")
+            reasons.append(f"🐋 <b>Balina Satışı:</b> <b>{fc.whale_accumulation_score:.0f}/100</b> (Nakit: {r['delta_str']})")
         if fc.squeeze_energy_pct >= 80:
-            reasons.append(f"💥 <b>Yüksek Sıkışma Alarmı:</b> Sıkışma <b>%{fc.squeeze_energy_pct:.0f}</b> (±%{fc.expected_breakout_move_pct:.1f} sert hareket yakın)")
+            reasons.append(f"💥 <b>Yüksek Sıkışma:</b> <b>%{fc.squeeze_energy_pct:.0f}</b> (±%{fc.expected_breakout_move_pct:.1f} hareket yakın)")
 
         if reasons:
             p_fmt = ",.4f" if r["price"] < 10.0 else ",.2f"
             sup_s = format(fc.nearest_support, p_fmt) if fc.nearest_support else "N/A"
             res_s = format(fc.nearest_resistance, p_fmt) if fc.nearest_resistance else "N/A"
-            tp1_s = format(fc.tp1_price, p_fmt) if fc.tp1_price > 0 else "N/A"
-            stop_s = format(fc.stop_price, p_fmt) if fc.stop_price > 0 else "N/A"
-            guide_line = f"• 📐 <b>Kırılım Nasıl Olur?:</b> {sr_guide_tr}\n" if sr_guide_tr else ""
+            sup_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Sıradan Destek")
+            res_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
+            sup_sc = getattr(fc, "nearest_support_score", 0.0)
+            res_sc = getattr(fc, "nearest_resistance_score", 0.0)
 
             radar_html = (
                 f"{header_title}\n"
                 f"💰 <b>Fiyat:</b> <code>{r['price_str']} USDT</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                + "\n".join([f"• { rs }" for rs in reasons])
-                + "\n\n"
-                + guide_line
-                + f"• 🟢 <b>Destek:</b> <code>{sup_s}</code> | 🔴 <b>Direnç:</b> <code>{res_s}</code>\n"
-                f"• 🎯 <b>1. Hedef:</b> <code>{tp1_s}</code> | 🛡️ <b>Stop:</b> <code>{stop_s}</code>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━"
+                + "\n".join([f"• {rs}" for rs in reasons[:3]])
+                + "\n"
+                + f"• <b>{sup_tier} ({sup_sc:.0f}p):</b> <code>{sup_s}</code>\n"
+                + f"• <b>{res_tier} ({res_sc:.0f}p):</b> <code>{res_s}</code>\n"
+                + f"• 🧲 <b>Mıknatıs (POC):</b> <code>{format(fc.poc_price, p_fmt)}</code>"
             )
-            kb = build_analysis_inline_keyboard(sym, "1H")
-            send_telegram_message(bot_token, chat_id, radar_html, reply_markup=kb)
-
-            # Automatically attach annotated chart PNG when a structural breakout/trap occurs
-            if is_breakout_event and r.get("df") is not None:
-                try:
-                    png_b = generate_telegram_chart_png(r["df"], fc, sym, "1H")
-                    if png_b:
-                        send_telegram_photo(
-                            bot_token,
-                            chat_id,
-                            png_b,
-                            caption_html=f"🖼️ <b>{sym} [1H] Kırılım &amp; Kritik Seviyeler Grafiği</b>",
-                        )
-                except Exception:
-                    pass
+            kb = build_analysis_inline_keyboard(sym, "4H")
+            if r.get("df") is not None:
+                _send_or_update_analysis_with_chart(
+                    bot_token,
+                    chat_id,
+                    r["df"],
+                    fc,
+                    sym,
+                    "4H",
+                    radar_html,
+                    kb,
+                    include_futures_levels=False,
+                )
+            else:
+                send_telegram_message(bot_token, chat_id, radar_html, reply_markup=kb)
 
             cooldowns[sym] = now_ts
             alerts_sent += 1
@@ -738,11 +761,11 @@ def _check_auto_session_bulletin(bot_token: str, chat_id: str) -> None:
     if session_tag and state.get("last_session_tag") != session_tag:
         state["last_session_tag"] = session_tag
         save_telegram_state(state)
-        _, _, results = _scan_watchlist_parallel("1h", only_high_quality=False)
+        _, _, results = _scan_watchlist_parallel("4h", only_high_quality=False)
         if results:
             sess_tr = results[0]["fc"].session_status_tr
-            html_mkt = format_market_overview_telegram_html(results, sess_tr, "1H")
-            kb = build_screener_inline_keyboard(results, "1H", False)
+            html_mkt = format_market_overview_telegram_html(results, sess_tr, "4H")
+            kb = build_screener_inline_keyboard(results, "4H", False)
             send_telegram_message(bot_token, chat_id, html_mkt, reply_markup=kb)
 
 
@@ -764,59 +787,72 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
     action = parts[0]
 
     # 1. Single-Coin Analysis, Timeframe Switch or Explicit Refresh: an:SYMBOL:TF or an_ref:SYMBOL:TF
-    if action in ("an", "an_ref") and len(parts) >= 3:
+    if action in ("an", "an_ref") and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
+        tf = parts[2] if len(parts) >= 3 else "4H"
         is_ref = action == "an_ref"
         answer_callback_query(
             bot_token,
             cq_id,
-            f"🔄 {sym} ({tf}) canlı verilerle yenileniyor..." if is_ref else f"⏳ {sym} ({tf}) analiz açılıyor...",
+            f"🔄 {sym} ({tf}) grafik & analiz yenileniyor..." if is_ref else f"📊 {sym} ({tf}) grafik & analiz açılıyor...",
         )
-        ex_c = str(load_telegram_state().get("primary_exchange", "binance")).lower()
-        with _CACHE_LOCK:
-            cached_b = _BUNDLE_CACHE.get(f"{ex_c}:{sym.upper()}")
-            is_cold = is_ref or (cached_b is None) or ((time.time() - cached_b[0]) > CACHE_TTL_SEC)
-        if is_cold and not is_photo_msg and msg_id:
-            edit_telegram_message(
-                bot_token,
-                chat_id,
-                msg_id,
-                f"⏳ <b>{sym} [{tf.upper()}]</b> canlı borsa verileri çekiliyor ve 4 kart analiz hazırlanıyor...",
-            )
-        html_text, kb, _, _, _ = _analyze_single_coin(sym, tf, force_refresh=is_ref)
-        if not is_photo_msg and msg_id:
-            ok = edit_telegram_message(bot_token, chat_id, msg_id, html_text, reply_markup=kb)
-            if not ok:
-                send_telegram_message(bot_token, chat_id, html_text, reply_markup=kb)
-        else:
-            send_telegram_message(bot_token, chat_id, html_text, reply_markup=kb)
+        html_text, kb, df_act, fc_act, _ = _analyze_single_coin(sym, tf, force_refresh=is_ref)
+        _send_or_update_analysis_with_chart(
+            bot_token,
+            chat_id,
+            df_act,
+            fc_act,
+            sym,
+            tf,
+            html_text,
+            kb,
+            include_futures_levels=False,
+            msg_id=msg_id,
+            is_photo_msg=is_photo_msg,
+        )
 
-    # 2. Send PNG Chart Snapshot: chart:SYMBOL:TF
-    elif action == "chart" and len(parts) >= 3:
+    # 2. Send PNG Chart Snapshot: chart:SYMBOL:TF (General Chart WITHOUT Futures Stop/TP) or fut_chart:SYMBOL:TF (Futures Chart WITH Stop/TP)
+    elif action in ("chart", "fut_chart") and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
-        answer_callback_query(bot_token, cq_id, f"🖼️ {sym} ({tf}) grafiği hazırlanıyor...")
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        is_fut_chart = action == "fut_chart"
+        answer_callback_query(
+            bot_token,
+            cq_id,
+            f"🖼️ {sym} ({tf}) {'Vadeli ' if is_fut_chart else ''}grafiği hazırlanıyor...",
+        )
         df_act, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, tf)
-        png_bytes = generate_telegram_chart_png(df_act, fc_act, sym, tf)
-        kb = build_analysis_inline_keyboard(sym, tf)
+        png_bytes = generate_telegram_chart_png(df_act, fc_act, sym, tf, include_futures_levels=is_fut_chart)
+        kb = build_futures_setup_inline_keyboard(sym, tf) if is_fut_chart else build_analysis_inline_keyboard(sym, tf)
         if png_bytes:
             p_fmt = ",.4f" if curr_p < 10.0 else ",.2f"
-            tr_lbl = "📈 Yükselen" if fc_act.score >= 15 else ("📉 Düşen" if fc_act.score <= -15 else "⚖️ Yatay")
-            caption = (
-                f"🖼️ <b>{sym} [{tf.upper()}] GRAFİK &amp; SEVİYELER</b>\n"
-                f"• <b>Trend:</b> {tr_lbl} ({fc_act.score:+.0f}/100) | <b>Hazırlık:</b> {fc_act.readiness_score_5}/5\n"
-                f"• 💰 <b>Fiyat:</b> <code>{format(curr_p, p_fmt)} USDT</code> | 🧲 <b>Mıknatıs:</b> <code>{format(fc_act.poc_price, p_fmt)}</code>\n"
-                f"• 🎯 <b>Hedef:</b> <code>{format(fc_act.tp1_price, p_fmt)}</code> ➔ <code>{format(fc_act.tp2_price, p_fmt)}</code> | 🛡️ <b>Stop:</b> <code>{format(fc_act.stop_price, p_fmt)}</code>"
-            )
+            sup_tier = getattr(fc_act, "nearest_support_tier_tr", "🟢 Sıradan Destek")
+            res_tier = getattr(fc_act, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
+            sup_s = format(fc_act.nearest_support, p_fmt) if fc_act.nearest_support else "N/A"
+            res_s = format(fc_act.nearest_resistance, p_fmt) if fc_act.nearest_resistance else "N/A"
+            if is_fut_chart and fc_act.futures_setup and fc_act.futures_setup.is_tradeable:
+                fs = fc_act.futures_setup
+                caption = (
+                    f"🖼️ <b>{sym} [{tf.upper()}] VADELİ İŞLEM GRAFİĞİ ({fs.direction})</b>\n"
+                    f"• 💰 <b>Fiyat:</b> <code>{format(curr_p, p_fmt)} USDT</code> | 🎯 <b>Giriş:</b> <code>{format(fs.entry_price, p_fmt)}</code>\n"
+                    f"• 🟢 <b>TP1:</b> <code>{format(fs.tp1_price, p_fmt)}</code> | <b>TP2:</b> <code>{format(fs.tp2_price, p_fmt)}</code> | 🛡️ <b>Stop:</b> <code>{format(fs.stop_price, p_fmt)}</code>"
+                )
+            else:
+                tr_lbl = "📈 Yükselen" if fc_act.score >= 15 else ("📉 Düşen" if fc_act.score <= -15 else "⚖️ Yatay")
+                caption = (
+                    f"🖼️ <b>{sym} [{tf.upper()}] GRAFİK &amp; DESTEK/DİRENÇLER</b>\n"
+                    f"• <b>Trend:</b> {tr_lbl} ({fc_act.score:+.0f}/100) | 💰 <b>Fiyat:</b> <code>{format(curr_p, p_fmt)} USDT</code>\n"
+                    f"• <b>{sup_tier}:</b> <code>{sup_s}</code> | <b>{res_tier}:</b> <code>{res_s}</code>\n"
+                    f"• 🧲 <b>Mıknatıs (POC):</b> <code>{format(fc_act.poc_price, p_fmt)}</code>"
+                )
             send_telegram_photo(bot_token, chat_id, png_bytes, caption_html=caption, reply_markup=kb)
         else:
             send_telegram_message(bot_token, chat_id, "❌ Grafik görseli oluşturulamadı.", reply_markup=kb)
 
     # 3. Magnet (POC) & Liquidation Map: liq:SYMBOL:TF
-    elif action == "liq" and len(parts) >= 3:
+    elif action == "liq" and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
+        tf = parts[2] if len(parts) >= 3 else "4H"
         answer_callback_query(bot_token, cq_id, f"🧲 {sym} Mıknatıs & Likidasyon haritası açılıyor...")
         _, _, tf_fcs, _, curr_p = _compute_full_coin_bundle(sym, tf)
         html_liq = format_liquidation_magnet_telegram_html(sym, tf_fcs, curr_p)
@@ -828,9 +864,9 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             send_telegram_message(bot_token, chat_id, html_liq, reply_markup=kb)
 
     # 4. Position Sizing & Risk Plan: kasa:SYMBOL:TF[:CAPITAL]
-    elif action == "kasa" and len(parts) >= 3:
+    elif action == "kasa" and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
+        tf = parts[2] if len(parts) >= 3 else "4H"
         cap_val = float(parts[3]) if len(parts) >= 4 else 1000.0
         answer_callback_query(bot_token, cq_id, f"🧮 {sym} ({cap_val:,.0f}$) Kasa planı hesaplanıyor...")
         _, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, tf)
@@ -843,9 +879,9 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             send_telegram_message(bot_token, chat_id, html_kasa, reply_markup=kb)
 
     # 5. Quick 1-Tap Resistance / Support Price Alarm Setup: al_res:SYMBOL:TF or al_sup:SYMBOL:TF
-    elif action in ("al_res", "al_sup") and len(parts) >= 3:
+    elif action in ("al_res", "al_sup") and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
+        tf = parts[2] if len(parts) >= 3 else "4H"
         answer_callback_query(bot_token, cq_id, f"🔔 {sym} ({tf}) alarm seviyesi kaydediliyor...")
         _, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, tf)
         if action == "al_res":
@@ -914,7 +950,7 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
                 send_telegram_message(
                     bot_token,
                     chat_id,
-                    "ℹ️ <b>Radar Kontrolü Tamamlandı:</b> Şu an izleme listenizde acil kırılım (4/5+), aşırı balina (>=70) veya patlama sıkışması (>=%80) kriterini tetikleyen coin bulunmuyor.",
+                    "ℹ️ <b>Radar Kontrolü Tamamlandı (4H):</b> Şu an izleme listenizde acil kırılım (4/5+), aşırı balina (>=70) veya patlama sıkışması (>=%80) kriterini tetikleyen coin bulunmuyor.",
                 )
             return
 
@@ -925,14 +961,14 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 
     # 8. Coin Picker Menu: coins:TF
     elif action == "coins":
-        tf = parts[1] if len(parts) >= 2 else "1H"
+        tf = parts[1] if len(parts) >= 2 else "4H"
         answer_callback_query(bot_token, cq_id, f"🪙 Coin Seçim Menüsü ({tf})")
         wl = _load_shared_watchlist()
         now_hm = time.strftime("%H:%M:%S")
         html_c = (
             f"🪙 <b>AKTİF İZLEME LİSTENİZ ({tf.upper()} DİLİMİ)</b> <i>({now_hm})</i>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "<i>Detaylı 4 kart analizini görmek istediğiniz coinin butonuna dokunun veya alttan zaman dilimini değiştirin:</i>"
+            "<i>Grafikli özet analizini görmek istediğiniz coinin butonuna dokunun veya alttan zaman dilimini değiştirin:</i>"
         )
         kb_c = build_coin_list_inline_keyboard(wl, tf)
         if not is_photo_msg and msg_id:
@@ -943,7 +979,7 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 
     # 9. Parallel Multi-Coin Screener: scan:TF:ONLY_HQ
     elif action == "scan":
-        tf = parts[1] if len(parts) >= 2 else "1H"
+        tf = parts[1] if len(parts) >= 2 else "4H"
         only_hq = (parts[2] == "1") if len(parts) >= 3 else False
         answer_callback_query(bot_token, cq_id, f"🔍 [{tf}] Paralel tarama açılıyor...")
         with _CACHE_LOCK:
@@ -965,7 +1001,7 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 
     # 10. Global Market & Cash Flow Overview: market:TF
     elif action == "market":
-        tf = parts[1] if len(parts) >= 2 else "1H"
+        tf = parts[1] if len(parts) >= 2 else "4H"
         answer_callback_query(bot_token, cq_id, "🌍 Küresel piyasa & nakit akışı açılıyor...")
         with _CACHE_LOCK:
             cached_s = _SCAN_CACHE.get(tf.lower())
@@ -988,39 +1024,36 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
             else:
                 send_telegram_message(bot_token, chat_id, html_m, reply_markup=kb_m)
 
-    # 11. Dedicated Perpetual Futures (Vadeli İşlemler) Setup & Confidence Report: fut:SYMBOL:TF or fut_ref:SYMBOL:TF
-    elif action in ("fut", "fut_ref") and len(parts) >= 3:
+    # 11. Dedicated Perpetual Futures (Vadeli İşlemler) Setup & Chart Report: fut:SYMBOL:TF or fut_ref:SYMBOL:TF
+    elif action in ("fut", "fut_ref") and len(parts) >= 2:
         sym = parts[1]
-        tf = parts[2]
+        tf = parts[2] if len(parts) >= 3 else "4H"
         is_ref = action == "fut_ref"
         answer_callback_query(
             bot_token,
             cq_id,
-            f"⚡ {sym} ({tf}) Vadeli İşlem (Long/Short) & Güven Radarı hesaplanıyor...",
+            f"⚡ {sym} ({tf}) Vadeli İşlem Planı & Grafiği hazırlanıyor...",
         )
-        ex_c = str(load_telegram_state().get("primary_exchange", "binance")).lower()
-        with _CACHE_LOCK:
-            cached_b = _BUNDLE_CACHE.get(f"{ex_c}:{sym.upper()}")
-            is_cold = is_ref or (cached_b is None) or ((time.time() - cached_b[0]) > CACHE_TTL_SEC)
-        if is_cold and not is_photo_msg and msg_id:
-            edit_telegram_message(
-                bot_token,
-                chat_id,
-                msg_id,
-                f"⚡ <b>{sym} [{tf.upper()}]</b> Vadeli İşlem (Long/Short) giriş, TP, Stop ve güven notu hesaplanıyor...",
-            )
-        _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf, force_refresh=is_ref)
+        df_act, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf, force_refresh=is_ref)
         html_fut = format_futures_setup_telegram_html(fc_act, sym, tf, curr_p, mtf_scores=mtf_sc)
         kb_fut = build_futures_setup_inline_keyboard(sym, tf)
-        if not is_photo_msg and msg_id:
-            if not edit_telegram_message(bot_token, chat_id, msg_id, html_fut, reply_markup=kb_fut):
-                send_telegram_message(bot_token, chat_id, html_fut, reply_markup=kb_fut)
-        else:
-            send_telegram_message(bot_token, chat_id, html_fut, reply_markup=kb_fut)
+        _send_or_update_analysis_with_chart(
+            bot_token,
+            chat_id,
+            df_act,
+            fc_act,
+            sym,
+            tf,
+            html_fut,
+            kb_fut,
+            include_futures_levels=True,
+            msg_id=msg_id,
+            is_photo_msg=is_photo_msg,
+        )
 
     # 12. Multi-Coin Perpetual Futures Radar Scan: fut_scan:TF
     elif action == "fut_scan":
-        tf = parts[1] if len(parts) >= 2 else "1H"
+        tf = parts[1] if len(parts) >= 2 else "4H"
         answer_callback_query(bot_token, cq_id, f"📡 [{tf}] Vadeli İşlem Radarı taranıyor...")
         with _CACHE_LOCK:
             cached_s = _SCAN_CACHE.get(tf.lower())
@@ -1043,7 +1076,7 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 
     # 13. Support / Resistance Breakout & Trap Radar Scan: brk_scan:TF
     elif action == "brk_scan":
-        tf = parts[1] if len(parts) >= 2 else "1H"
+        tf = parts[1] if len(parts) >= 2 else "4H"
         answer_callback_query(bot_token, cq_id, f"🚨 [{tf}] Destek/Direnç Kırılım & Tuzak Radarı taranıyor...")
         with _CACHE_LOCK:
             cached_s = _SCAN_CACHE.get(tf.lower())
@@ -1070,22 +1103,22 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
 def _map_reply_keyboard_text(raw_text: str) -> str:
     """
     Maps persistent bottom Reply Keyboard button texts to slash commands reliably,
-    even if mobile Telegram clients alter emoji variation selectors.
+    defaulting all scans and radars to 4H.
     """
     t = raw_text.strip()
     t_low = t.lower()
     if "coin seç" in t_low or "coin listesi" in t_low or t.startswith("🪙"):
         return "/liste"
     if "kırılım" in t_low or "kirilim" in t_low or t.startswith("🚨"):
-        return "/kirilim 1h"
+        return "/kirilim 4h"
     if "vadeli" in t_low or t.startswith("⚡"):
-        return "/vadelitara 1h"
+        return "/vadelitara 4h"
     if "tümünü tara" in t_low or t.startswith("🚀"):
-        return "/tara 1h"
+        return "/tara 4h"
     if "fırsatlar" in t_low or "firsatlar" in t_low or t.startswith("🎯"):
-        return "/firsat 1h"
+        return "/firsat 4h"
     if "piyasa" in t_low or "nakit özeti" in t_low or t.startswith("🌍"):
-        return "/piyasa"
+        return "/piyasa 4h"
     if "alarmlarım" in t_low or "alarmlarim" in t_low or t.startswith("⏰"):
         return "/alarmlar"
     if "komutlar" in t_low or "yardım" in t_low or "yardim" in t_low or t.startswith("📋"):
@@ -1112,38 +1145,43 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(
                 bot_token,
                 chat_id,
-                "👇 <b>Hızlı Başlangıç:</b> Analiz etmek istediğiniz coine dokunun:",
-                reply_markup=build_coin_list_inline_keyboard(wl, "1H"),
+                "👇 <b>Hızlı Başlangıç (Varsayılan: 4H):</b> Analiz etmek istediğiniz coine dokunun:",
+                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
         elif cmd == "/analiz":
             sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"
-            tf = parts[2].lower() if len(parts) >= 3 else "1h"
-            send_telegram_message(
+            tf = parts[2].lower() if len(parts) >= 3 else "4h"
+            report_html, kb, df_act, fc_act, _ = _analyze_single_coin(sym, tf)
+            _send_or_update_analysis_with_chart(
                 bot_token,
                 chat_id,
-                f"⏳ <b>{sym} [{tf.upper()}]</b> için 4 kart analiz, kırılım ve likidasyon seviyeleri hesaplanıyor...",
+                df_act,
+                fc_act,
+                sym,
+                tf,
+                report_html,
+                kb,
+                include_futures_levels=False,
             )
-            report_html, kb, df_act, fc_act, _ = _analyze_single_coin(sym, tf)
-            send_telegram_message(bot_token, chat_id, report_html, reply_markup=kb)
-            if load_telegram_state().get("send_chart_with_analysis", False):
-                png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf)
-                if png_b:
-                    send_telegram_photo(bot_token, chat_id, png_b, caption_html=f"🖼️ <b>{sym} [{tf.upper()}] Grafik Görünümü</b>")
 
         elif cmd in ("/grafik", "/chart"):
             sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"
-            tf = parts[2].lower() if len(parts) >= 3 else "1h"
-            send_telegram_message(bot_token, chat_id, f"🖼️ <b>{sym} [{tf.upper()}]</b> grafiği çiziliyor...")
+            tf = parts[2].lower() if len(parts) >= 3 else "4h"
             df_act, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, tf)
-            png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf)
+            png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf, include_futures_levels=False)
             kb = build_analysis_inline_keyboard(sym, tf.upper())
             if png_b:
                 p_fmt = ",.4f" if curr_p < 10.0 else ",.2f"
+                sup_tier = getattr(fc_act, "nearest_support_tier_tr", "🟢 Sıradan Destek")
+                res_tier = getattr(fc_act, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
+                sup_s = format(fc_act.nearest_support, p_fmt) if fc_act.nearest_support else "N/A"
+                res_s = format(fc_act.nearest_resistance, p_fmt) if fc_act.nearest_resistance else "N/A"
                 cap = (
-                    f"🖼️ <b>{sym} [{tf.upper()}] GRAFİK &amp; KRİTİK SEVİYELER</b>\n"
+                    f"🖼️ <b>{sym} [{tf.upper()}] GRAFİK &amp; DESTEK/DİRENÇLER</b>\n"
                     f"💰 <b>Fiyat:</b> <code>{format(curr_p, p_fmt)} USDT</code> | 🚦 <b>Hazırlık:</b> {fc_act.readiness_score_5}/5\n"
-                    f"🎯 <b>Hedefler:</b> <code>{format(fc_act.tp1_price, p_fmt)}</code> ➔ <code>{format(fc_act.tp2_price, p_fmt)}</code> | 🛡️ <b>Stop:</b> <code>{format(fc_act.stop_price, p_fmt)}</code>"
+                    f"• <b>{sup_tier}:</b> <code>{sup_s}</code> | <b>{res_tier}:</b> <code>{res_s}</code>\n"
+                    f"• 🧲 <b>Mıknatıs (POC):</b> <code>{format(fc_act.poc_price, p_fmt)}</code>"
                 )
                 send_telegram_photo(bot_token, chat_id, png_b, caption_html=cap, reply_markup=kb)
             else:
@@ -1151,13 +1189,13 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
 
         elif cmd in ("/miknatis", "/likidasyon", "/poc"):
             sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"
-            _, _, tf_fcs, _, curr_p = _compute_full_coin_bundle(sym, "1h")
+            _, _, tf_fcs, _, curr_p = _compute_full_coin_bundle(sym, "4h")
             html_liq = format_liquidation_magnet_telegram_html(sym, tf_fcs, curr_p)
             send_telegram_message(
                 bot_token,
                 chat_id,
                 html_liq,
-                reply_markup=build_analysis_inline_keyboard(sym, "1H"),
+                reply_markup=build_analysis_inline_keyboard(sym, "4H"),
             )
 
         elif cmd in ("/kasa", "/risk", "/pozisyon"):
@@ -1174,18 +1212,18 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                     risk_p = float(parts[3])
                 except Exception:
                     risk_p = 1.0
-            _, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, "1h")
-            html_kasa = format_position_size_telegram_html(fc_act, sym, "1H", curr_p, capital_usd=cap_val, risk_pct=risk_p)
+            _, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, "4h")
+            html_kasa = format_position_size_telegram_html(fc_act, sym, "4H", curr_p, capital_usd=cap_val, risk_pct=risk_p)
             send_telegram_message(
                 bot_token,
                 chat_id,
                 html_kasa,
-                reply_markup=_build_kasa_inline_keyboard(sym, "1H", cap_val),
+                reply_markup=_build_kasa_inline_keyboard(sym, "4H", cap_val),
             )
 
         elif cmd in ("/vadeli", "/futures"):
             if len(parts) < 2 or parts[1].lower() in ("15m", "1h", "4h", "1d", "tara"):
-                tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("15m", "1h", "4h", "1d")) else "1h"
+                tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("15m", "1h", "4h", "1d")) else "4h"
                 send_telegram_message(
                     bot_token,
                     chat_id,
@@ -1197,19 +1235,24 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 send_telegram_message(bot_token, chat_id, html_fs, reply_markup=kb_fs)
             else:
                 sym = _normalize_symbol(parts[1])
-                tf = parts[2].lower() if len(parts) >= 3 else "1h"
-                send_telegram_message(
-                    bot_token,
-                    chat_id,
-                    f"⚡ <b>{sym} [{tf.upper()}]</b> Vadeli İşlem (Long/Short) giriş, TP, Stop ve güven notu hesaplanıyor...",
-                )
-                _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
+                tf = parts[2].lower() if len(parts) >= 3 else "4h"
+                df_act, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
                 html_fut = format_futures_setup_telegram_html(fc_act, sym, tf, curr_p, mtf_scores=mtf_sc)
                 kb_fut = build_futures_setup_inline_keyboard(sym, tf)
-                send_telegram_message(bot_token, chat_id, html_fut, reply_markup=kb_fut)
+                _send_or_update_analysis_with_chart(
+                    bot_token,
+                    chat_id,
+                    df_act,
+                    fc_act,
+                    sym,
+                    tf,
+                    html_fut,
+                    kb_fut,
+                    include_futures_levels=True,
+                )
 
         elif cmd in ("/vadelitara", "/vadeliradar"):
-            tf = parts[1].lower() if len(parts) >= 2 else "1h"
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
             send_telegram_message(
                 bot_token,
                 chat_id,
@@ -1221,11 +1264,11 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(bot_token, chat_id, html_fs, reply_markup=kb_fs)
 
         elif cmd in ("/kirilim", "/kirilimtara", "/breakout"):
-            tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("15m", "1h", "4h", "1d")) else "1h"
+            tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("15m", "1h", "4h", "1d")) else "4h"
             send_telegram_message(
                 bot_token,
                 chat_id,
-                f"🚨 <b>[{tf.upper()}]</b> Destek/Direnç Kırılım, Tuzak (SFP) ve 'Kırılım Nasıl Olur?' Radarı taranıyor...",
+                f"🚨 <b>[{tf.upper()}]</b> Destek/Direnç Kırılım, Tuzak (SFP) ve Retest Radarı taranıyor...",
             )
             _, _, results = _scan_watchlist_parallel(tf, only_high_quality=False)
             html_brk = format_breakout_radar_scan_telegram_html(results, tf)
@@ -1233,7 +1276,7 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(bot_token, chat_id, html_brk, reply_markup=kb_brk)
 
         elif cmd == "/tara":
-            tf = parts[1].lower() if len(parts) >= 2 else "1h"
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
             send_telegram_message(
                 bot_token,
                 chat_id,
@@ -1243,7 +1286,7 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(bot_token, chat_id, scan_html, reply_markup=kb_s)
 
         elif cmd == "/firsat":
-            tf = parts[1].lower() if len(parts) >= 2 else "1h"
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
             send_telegram_message(
                 bot_token,
                 chat_id,
@@ -1253,7 +1296,7 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(bot_token, chat_id, scan_html, reply_markup=kb_s)
 
         elif cmd in ("/piyasa", "/nakit", "/makro"):
-            tf = parts[1].lower() if len(parts) >= 2 else "1h"
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
             send_telegram_message(bot_token, chat_id, "🌍 Küresel piyasa iklimi ve sıcak para akışı hesaplanıyor...")
             _, _, results = _scan_watchlist_parallel(tf, only_high_quality=False)
             if results:
@@ -1313,8 +1356,8 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             send_telegram_message(
                 bot_token,
                 chat_id,
-                "🪙 <b>AKTİF İZLEME LİSTENİZ</b>\n<i>Analizini açmak istediğiniz coinin butonuna dokunun:</i>",
-                reply_markup=build_coin_list_inline_keyboard(wl, "1H"),
+                "🪙 <b>AKTİF İZLEME LİSTENİZ (4H)</b>\n<i>Grafikli özet analizini açmak istediğiniz coinin butonuna dokunun:</i>",
+                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
         elif cmd == "/ekle" and len(parts) >= 2:
@@ -1327,7 +1370,7 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 bot_token,
                 chat_id,
                 f"✅ <b>{sym}</b> izleme listenize eklendi!",
-                reply_markup=build_coin_list_inline_keyboard(wl, "1H"),
+                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
         elif cmd == "/cikar" and len(parts) >= 2:
@@ -1338,23 +1381,24 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 bot_token,
                 chat_id,
                 f"🗑️ <b>{sym}</b> izleme listenizden çıkarıldı.",
-                reply_markup=build_coin_list_inline_keyboard(wl, "1H"),
+                reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
         elif not cmd.startswith("/") and 2 <= len(parts[0]) <= 12:
             sym = _normalize_symbol(parts[0])
-            tf = parts[1].lower() if len(parts) >= 2 else "1h"
-            send_telegram_message(
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
+            report_html, kb, df_act, fc_act, _ = _analyze_single_coin(sym, tf)
+            _send_or_update_analysis_with_chart(
                 bot_token,
                 chat_id,
-                f"⏳ <b>{sym} [{tf.upper()}]</b> analiz ediliyor...",
+                df_act,
+                fc_act,
+                sym,
+                tf,
+                report_html,
+                kb,
+                include_futures_levels=False,
             )
-            report_html, kb, df_act, fc_act, _ = _analyze_single_coin(sym, tf)
-            send_telegram_message(bot_token, chat_id, report_html, reply_markup=kb)
-            if load_telegram_state().get("send_chart_with_analysis", False):
-                png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf)
-                if png_b:
-                    send_telegram_photo(bot_token, chat_id, png_b, caption_html=f"🖼️ <b>{sym} [{tf.upper()}] Grafik Görünümü</b>")
 
     except Exception as cmd_err:
         _log(f"Komut işleme hatası ({text}): {cmd_err}")
@@ -1364,7 +1408,7 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
             chat_id,
             "⚠️ <b>Sembol Borsada Bulunamadı veya Veri Alınamadı:</b>\n"
             f"Girilen komut/coin (<code>{text}</code>) borsada doğrulanamadı. Lütfen yazımı kontrol edin veya aşağıdaki listeden dokunarak seçin:",
-            reply_markup=build_coin_list_inline_keyboard(wl, "1H"),
+            reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
         )
 
 

@@ -899,7 +899,7 @@ class InteractiveChartVisualizer:
                 for idx_s, sup in enumerate(fc.support_levels[:2], start=1):
                     is_str_s = bool(getattr(sup, "is_strong", False))
                     s_score_v = float(getattr(sup, "strength_score", 45.0))
-                    s_tier = f"{idx_s}. 🛡️ Güçlü Destek" if is_str_s else f"{idx_s}. 🟢 Destek"
+                    s_tier = f"{idx_s}. 🛡️ Güçlü Destek" if is_str_s else f"{idx_s}. 🟢 Sıradan Destek"
                     s_reasons = getattr(sup, "confluence_tags", []) or []
                     s_reason_short = f" • {s_reasons[0]}" if s_reasons else ""
                     s_stats_tr = getattr(sup, "stats_summary_tr", "")
@@ -959,7 +959,7 @@ class InteractiveChartVisualizer:
                 for idx_r, res in enumerate(fc.resistance_levels[:2], start=1):
                     is_str_r = bool(getattr(res, "is_strong", False))
                     r_score_v = float(getattr(res, "strength_score", 45.0))
-                    r_tier = f"{idx_r}. 🧱 Güçlü Direnç" if is_str_r else f"{idx_r}. 🔴 Direnç"
+                    r_tier = f"{idx_r}. 🧱 Güçlü Direnç" if is_str_r else f"{idx_r}. 🔴 Sıradan Direnç"
                     r_reasons = getattr(res, "confluence_tags", []) or []
                     r_reason_short = f" • {r_reasons[0]}" if r_reasons else ""
                     r_stats_tr = getattr(res, "stats_summary_tr", "")

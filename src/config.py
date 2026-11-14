@@ -14,7 +14,7 @@ class ExchangeConfig:
         default_factory=lambda: ["binance", "bybit", "okx", "kucoin", "gate", "kraken", "coinbase"]
     )
     symbol: str = "BTC/USDT"
-    timeframe: str = "1h"
+    timeframe: str = "4h"
     limit: int = 200
     timeout_ms: int = 15000
     orderbook_depth: int = 50

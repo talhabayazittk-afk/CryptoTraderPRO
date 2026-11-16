@@ -260,7 +260,7 @@ def start_bot_background() -> Tuple[bool, str]:
     """Starts telegram_bot.py as a single background process if not already running."""
     running, pid = is_bot_running()
     if running and pid:
-        return True, f"🟢 Telegram Botu zaten arka planda çalışıyor (PID: {pid})."
+        return True, f"🟢 7/24 Bot & Radar zaten arka planda çalışıyor (PID: {pid})."
     bot_script = ROOT_DIR / "telegram_bot.py"
     try:
         env = os.environ.copy()
@@ -271,6 +271,19 @@ def start_bot_background() -> Tuple[bool, str]:
             env["TELEGRAM_BOT_TOKEN"] = cfg["bot_token"]
         if cfg.get("chat_id"):
             env["TELEGRAM_CHAT_ID"] = cfg["chat_id"]
+        try:
+            from .x_publisher import load_x_config
+            x_cfg = load_x_config()
+            if x_cfg.get("api_key"):
+                env["X_API_KEY"] = x_cfg["api_key"]
+            if x_cfg.get("api_secret"):
+                env["X_API_SECRET"] = x_cfg["api_secret"]
+            if x_cfg.get("access_token"):
+                env["X_ACCESS_TOKEN"] = x_cfg["access_token"]
+            if x_cfg.get("access_token_secret"):
+                env["X_ACCESS_TOKEN_SECRET"] = x_cfg["access_token_secret"]
+        except Exception:
+            pass
 
         popen_kwargs: Dict[str, Any] = {
             "cwd": str(ROOT_DIR),
@@ -291,7 +304,7 @@ def start_bot_background() -> Tuple[bool, str]:
 
         proc = subprocess.Popen([sys.executable, str(bot_script)], **popen_kwargs)
         PID_FILE.write_text(str(proc.pid), encoding="utf-8")
-        return True, f"🤖 7/24 İnteraktif Telegram Botu ve Radar başlatıldı (PID: {proc.pid})!"
+        return True, f"🤖 7/24 İnteraktif Telegram & X (Twitter) Otomatik Radar Botu başlatıldı (PID: {proc.pid})!"
     except Exception as e:
         return False, f"❌ Bot başlatılamadı: {e}"
 
@@ -392,6 +405,7 @@ def build_analysis_inline_keyboard(
             [
                 {"text": "🔔 Direnç Alarmı (+)", "callback_data": f"al_res:{sym_up}:{tf_up}"},
                 {"text": "🔔 Destek Alarmı (-)", "callback_data": f"al_sup:{sym_up}:{tf_up}"},
+                {"text": "🐦 X'te Paylaş", "callback_data": f"x_post:{sym_up}:{tf_up}"},
             ],
             [
                 wl_btn,
@@ -407,7 +421,7 @@ def build_futures_setup_inline_keyboard(symbol: str, active_tf: str = "4H") -> D
     Builds interactive touch buttons underneath the Dedicated Perpetual Futures Setup screen:
       Row 1: [15M] [1H] [4H] [1D] instant timeframe switcher for Futures Setup
       Row 2: [📊 Genel Analiz] [🖼️ Vadeli Grafik] [🧮 Kasa Planı]
-      Row 3: [🔔 Direnç Alarmı (+)] [🔔 Destek Alarmı (-)]
+      Row 3: [🔔 Direnç Alarmı (+)] [🔔 Destek Alarmı (-)] [🐦 X'te Paylaş]
       Row 4: [🔄 Canlı Yenile] [📡 Tüm Vadeli Radarı Tara] [🪙 Coin Seç]
     """
     tf_up = active_tf.upper()
@@ -427,6 +441,7 @@ def build_futures_setup_inline_keyboard(symbol: str, active_tf: str = "4H") -> D
             [
                 {"text": "🔔 Direnç Alarmı (+)", "callback_data": f"al_res:{symbol}:{tf_up}"},
                 {"text": "🔔 Destek Alarmı (-)", "callback_data": f"al_sup:{symbol}:{tf_up}"},
+                {"text": "🐦 X'te Paylaş", "callback_data": f"x_fut:{symbol}:{tf_up}"},
             ],
             [
                 {"text": "🔄 Yenile", "callback_data": f"fut_ref:{symbol}:{tf_up}"},
@@ -475,6 +490,7 @@ def build_futures_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: s
         [
             {"text": "🚀 Genel Tarama Tablosu", "callback_data": f"scan:{tf_up}:0"},
             {"text": "🌍 Piyasa & Nakit Özeti", "callback_data": f"market:{tf_up}"},
+            {"text": "🐦 X'te Paylaş", "callback_data": f"x_fut_scan:{tf_up}"},
         ]
     )
     return {"inline_keyboard": kb_rows}
@@ -613,23 +629,34 @@ def build_screener_inline_keyboard(
         [
             toggle_btn,
             {"text": "🌍 Piyasa Özeti", "callback_data": f"market:{tf_up}"},
+            {"text": "🐦 X'te Paylaş", "callback_data": f"x_scan:{tf_up}:{q_flag}"},
         ]
     )
     return {"inline_keyboard": kb_rows}
 
 
 def build_alarm_radar_inline_keyboard(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Builds interactive touch controls for Alarms & 24/7 Radar settings."""
+    """Builds interactive touch controls for Alarms & 24/7 Telegram + X (Twitter) Radar settings."""
     radar_on = bool(state.get("radar_enabled", True))
     sess_on = bool(state.get("auto_session_summary", True))
     alarms = state.get("alarms", [])
+    try:
+        from .x_publisher import load_x_state
+        x_st = load_x_state()
+        x_radar_on = bool(x_st.get("x_auto_radar_enabled", True))
+    except Exception:
+        x_radar_on = True
 
     kb: List[List[Dict[str, str]]] = [
         [
             {
-                "text": "🟢 Radar: AÇIK (Kapatmak İçin Dokun)" if radar_on else "🔴 Radar: KAPALI (Açmak İçin Dokun)",
+                "text": "🟢 Telegram Radar: AÇIK" if radar_on else "🔴 Telegram Radar: KAPALI",
                 "callback_data": "radar:toggle",
-            }
+            },
+            {
+                "text": "🐦 X Otomatik Radar: AÇIK" if x_radar_on else "⚪ X Otomatik Radar: KAPALI",
+                "callback_data": "x_radar:toggle",
+            },
         ],
         [
             {
@@ -1014,11 +1041,19 @@ def format_market_overview_telegram_html(
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"🧭 <b>Genel İklim:</b> <b>{mkt_mood}</b>",
         f"🕒 <b>Aktif Seans:</b> {session_status_tr}",
-        f"📊 <b>Trend Dağılımı ({len(coin_summaries)} Coin):</b>",
-        f"   • 📈 Yükselen: <b>{len(bulls)}</b> | 📉 Düşen: <b>{len(bears)}</b> | ⚖️ Yatay: <b>{len(neutrals)}</b>",
-        "",
-        "💸 <b>SICAK PARA &amp; BALİNA LİDERLERİ</b>",
     ]
+    if coin_summaries and getattr(coin_summaries[0].get("fc"), "macro_liquidity_tr", ""):
+        mac_l = getattr(coin_summaries[0]["fc"], "macro_liquidity_tr", "")
+        if mac_l and mac_l != "Makro Likidite Dengeli":
+            lines.append(f"🌐 <b>Makro Pusula:</b> {mac_l}")
+    lines.extend(
+        [
+            f"📊 <b>Trend Dağılımı ({len(coin_summaries)} Coin):</b>",
+            f"   • 📈 Yükselen: <b>{len(bulls)}</b> | 📉 Düşen: <b>{len(bears)}</b> | ⚖️ Yatay: <b>{len(neutrals)}</b>",
+            "",
+            "💸 <b>SICAK PARA &amp; BALİNA LİDERLERİ</b>",
+        ]
+    )
     if top_in:
         lines.append(f"• 🟢 <b>En Güçlü Para Girişi:</b> <b>{top_in['symbol']}</b> (Nakit: {top_in['delta_str']} | CMF: {top_in['cmf']:+.2f})")
     if top_out:
@@ -1186,6 +1221,7 @@ def build_breakout_radar_inline_keyboard(rows: List[Dict[str, Any]], timeframe: 
         [
             {"text": "⚡ Vadeli İşlem Radarı", "callback_data": f"fut_scan:{tf_up}"},
             {"text": "🚀 Genel Tarama Tablosu", "callback_data": f"scan:{tf_up}:0"},
+            {"text": "🐦 X'te Paylaş", "callback_data": f"x_brk_scan:{tf_up}"},
         ]
     )
     return {"inline_keyboard": kb_rows}

@@ -229,6 +229,16 @@ class TechnicalIndicators:
         cvd = net_money_delta_usd.cumsum()
         cvd_ema20 = cvd.ewm(span=20, adjust=False).mean()
 
+        # 3b. Phase 2 Statistical Cash-Flow Anomaly Z-Scores (Coin-Normalized Whale Footprint)
+        delta_mean_50 = net_money_delta_usd.rolling(window=50, min_periods=12).mean()
+        delta_std_50 = net_money_delta_usd.rolling(window=50, min_periods=12).std(ddof=0).replace(0.0, np.nan)
+        delta_zscore = ((net_money_delta_usd - delta_mean_50) / delta_std_50).fillna(0.0).clip(-5.0, 5.0)
+
+        delta_3bar = net_money_delta_usd.rolling(window=3, min_periods=1).sum()
+        d3_mean_50 = delta_3bar.rolling(window=50, min_periods=12).mean()
+        d3_std_50 = delta_3bar.rolling(window=50, min_periods=12).std(ddof=0).replace(0.0, np.nan)
+        flow_impulse_z = ((delta_3bar - d3_mean_50) / d3_std_50).fillna(0.0).clip(-5.0, 5.0)
+
         # 4. On-Balance Volume (OBV)
         direction = np.sign(close.diff()).fillna(0.0)
         obv = (direction * vol).cumsum()
@@ -283,6 +293,8 @@ class TechnicalIndicators:
             "rvol": rvol,
             "vwap_20": vwap_20,
             "absorption_signal": absorption_sig,
+            "delta_zscore": delta_zscore,
+            "flow_impulse_z": flow_impulse_z,
         }, index=df.index)
 
     @staticmethod
@@ -334,11 +346,11 @@ class TechnicalIndicators:
             "kalman_slope": kalman_slope,
         }, index=df.index)
 
-    def compute_hurst_and_chop(self, df: pd.DataFrame, chop_period: int = 14, hurst_window: int = 48) -> pd.DataFrame:
+    def compute_hurst_and_chop(self, df: pd.DataFrame, chop_period: int = 14, hurst_window: int = 96) -> pd.DataFrame:
         """
         Compute Mathematical Regime Metrics:
             1. Choppiness Index (CHOP 14): 0..100 (< 38.2 = Strong Directional Trend, > 61.8 = Sideways Chop)
-            2. Rolling Hurst Exponent (H in 0.15..0.85):
+            2. Multi-Scale Rolling Hurst Exponent (H in 0.15..0.85 over up to 96 bars, lags [1, 2, 4, 8, 16]):
                - H > 0.55: Persistent Trend Regime (Momentum works best)
                - H < 0.45: Anti-Persistent / Mean-Reverting Regime (Support/Resistance & Oscillators work best)
                - 0.45 <= H <= 0.55: Geometric Random Walk / High Noise (Reduce signal confidence)
@@ -355,7 +367,7 @@ class TechnicalIndicators:
         hl_span = (hh - ll).replace(0.0, np.nan)
         chop = (100.0 * np.log10((atr_sum / hl_span).clip(lower=1.0)) / np.log10(chop_period)).fillna(50.0).clip(0.0, 100.0)
 
-        # 2. Rolling Variance-Ratio / Rescaled-Range Hurst Exponent
+        # 2. Multi-Scale Log-Dispersion Hurst Exponent (strictly causal)
         closes = close.values
         n = len(closes)
         hurst_arr = np.full(n, 0.5, dtype=float)
@@ -364,21 +376,21 @@ class TechnicalIndicators:
         for i in range(min(24, n), n):
             start = max(0, i - hurst_window + 1)
             seg = log_p[start : i + 1]
-            if len(seg) < 16:
+            m_seg = len(seg)
+            if m_seg < 16:
                 continue
-            rets_1 = np.diff(seg)
-            std_1 = float(np.std(rets_1))
-            if std_1 <= 1e-10:
-                continue
-            # Compare multi-lag dispersion (lag=1 vs lag=4 vs lag=8)
-            lag4_diff = seg[4:] - seg[:-4]
-            lag8_diff = seg[8:] - seg[:-8]
-            s4 = float(np.std(lag4_diff))
-            s8 = float(np.std(lag8_diff))
-            if s4 > 1e-10 and s8 > 1e-10:
-                x_lags = np.log([1.0, 4.0, 8.0])
-                y_stds = np.log([std_1, s4, s8])
-                h_est = float(np.polyfit(x_lags, y_stds, 1)[0])
+            lags = [1, 2, 4, 8, 16] if m_seg >= 40 else [1, 2, 4, 8]
+            valid_x = []
+            valid_y = []
+            for lg in lags:
+                if m_seg > lg + 3:
+                    diffs = seg[lg:] - seg[:-lg]
+                    sd = float(np.std(diffs))
+                    if sd > 1e-10:
+                        valid_x.append(np.log(float(lg)))
+                        valid_y.append(np.log(sd))
+            if len(valid_x) >= 3:
+                h_est = float(np.polyfit(valid_x, valid_y, 1)[0])
                 hurst_arr[i] = float(np.clip(h_est, 0.15, 0.85))
 
         return pd.DataFrame({
@@ -389,9 +401,10 @@ class TechnicalIndicators:
     @staticmethod
     def compute_anchored_vwap(df: pd.DataFrame, lookback: int = 90) -> pd.DataFrame:
         """
-        Compute Institutional Anchored VWAPs (AVWAP) anchored from:
-            - `avwap_high`: Major Swing High of the last `lookback` bars (Seller/Short cost basis)
-            - `avwap_low`: Major Swing Low of the last `lookback` bars (Institutional Dip-Buyer cost basis)
+        Compute Institutional Anchored VWAPs (AVWAP) anchored strictly on CLOSED candles (Zero Repainting)
+        and WITHOUT backward-filling pre-anchor bars (Zero Look-Ahead Bias):
+            - `avwap_high`: Major Swing High of the last `lookback` closed bars (Seller/Short cost basis)
+            - `avwap_low`: Major Swing Low of the last `lookback` closed bars (Institutional Dip-Buyer cost basis)
         """
         n = len(df)
         if n == 0:
@@ -403,37 +416,37 @@ class TechnicalIndicators:
         vols = np.maximum(df["volume"].values, 1e-9)
         typ = (highs + lows + closes) / 3.0
 
-        start_win = max(0, n - lookback)
-        idx_high = start_win + int(np.argmax(highs[start_win:]))
-        idx_low = start_win + int(np.argmin(lows[start_win:]))
+        # Lock anchor selection to closed candles only so unclosed forming wicks never shift historical anchors
+        end_closed = n - 1 if (n >= 2 and "is_closed" in df.columns and not bool(df["is_closed"].iloc[-1])) else n
+        start_win = max(0, end_closed - lookback)
+        idx_high = start_win + int(np.argmax(highs[start_win:end_closed]))
+        idx_low = start_win + int(np.argmin(lows[start_win:end_closed]))
 
         avwap_high = np.full(n, np.nan, dtype=float)
         avwap_low = np.full(n, np.nan, dtype=float)
 
-        # Compute cumulative VWAP from idx_high forward
+        # Compute cumulative VWAP strictly forward from idx_high / idx_low (no .bfill() look-ahead leak)
         cum_pv_h = np.cumsum(typ[idx_high:] * vols[idx_high:])
         cum_v_h = np.cumsum(vols[idx_high:])
         avwap_high[idx_high:] = cum_pv_h / cum_v_h
 
-        # Compute cumulative VWAP from idx_low forward
         cum_pv_l = np.cumsum(typ[idx_low:] * vols[idx_low:])
         cum_v_l = np.cumsum(vols[idx_low:])
         avwap_low[idx_low:] = cum_pv_l / cum_v_l
 
         return pd.DataFrame({
-            "avwap_high": pd.Series(avwap_high, index=df.index).bfill(),
-            "avwap_low": pd.Series(avwap_low, index=df.index).bfill(),
+            "avwap_high": pd.Series(avwap_high, index=df.index),
+            "avwap_low": pd.Series(avwap_low, index=df.index),
         }, index=df.index)
 
     @staticmethod
     def compute_volume_profile(df: pd.DataFrame, bins: int = 36, time_decay: bool = True) -> Dict[str, object]:
         """
-        Compute Time-Decayed Institutional Volume Profile (Fiyat Kademelerine Göre Hacim Dağılımı):
-            - Applies exponential recency weighting when `time_decay=True` so recent volume clusters
-              outweigh stale historical volume
-            - POC (Point of Control): Price level with highest time-weighted traded volume
-            - VAH (Value Area High): Upper boundary of 70% volume concentration
-            - VAL (Value Area Low): Lower boundary of 70% volume concentration
+        Compute Time-Decayed Institutional Intrabar Volume Profile strictly on CLOSED candles:
+            - Locks to closed candles (`is_closed == True`) so forming candles never repaint POC/VAH/VAL
+            - Distributes each candle's volume across its `[low, high]` price bins (65% body, 35% full range)
+              rather than dumping 100% into a single point
+            - POC (Point of Control), VAH & VAL (70% Value Area)
         """
         if df.empty or len(df) < 5:
             last_p = float(df["close"].iloc[-1]) if not df.empty else 0.0
@@ -445,34 +458,64 @@ class TechnicalIndicators:
                 "bin_volumes": np.array([0.0]),
             }
 
-        low_min = float(df["low"].min())
-        high_max = float(df["high"].max())
+        work_df = (
+            df.iloc[:-1]
+            if (len(df) >= 6 and "is_closed" in df.columns and not bool(df["is_closed"].iloc[-1]))
+            else df
+        )
+        # Focus Volume Profile on recent 180 closed bars so ancient macro regimes don't dilute active trading range
+        if len(work_df) > 180:
+            work_df = work_df.tail(180)
+
+        low_min = float(work_df["low"].min())
+        high_max = float(work_df["high"].max())
         if high_max <= low_min:
             return {
                 "poc": low_min,
                 "vah": low_min,
                 "val": low_min,
                 "bin_centers": np.array([low_min]),
-                "bin_volumes": np.array([float(df["volume"].sum())]),
+                "bin_volumes": np.array([float(work_df["volume"].sum())]),
             }
 
         edges = np.linspace(low_min, high_max, bins + 1)
         centers = 0.5 * (edges[:-1] + edges[1:])
-        typical_prices = ((df["high"] + df["low"] + df["close"]) / 3.0).values
-        volumes = df["volume"].values
+        opens = work_df["open"].values if "open" in work_df.columns else work_df["close"].values
+        highs = work_df["high"].values
+        lows = work_df["low"].values
+        closes = work_df["close"].values
+        volumes = work_df["volume"].values
         n = len(volumes)
 
         if time_decay and n > 10:
             ages = np.arange(n - 1, -1, -1, dtype=float)
-            decay_weights = np.exp(-0.0075 * ages)
+            decay_weights = np.exp(-0.0065 * ages)
             eff_volumes = volumes * decay_weights
         else:
             eff_volumes = volumes
 
         hist_vol = np.zeros(bins, dtype=float)
-        bin_idx = np.clip(np.digitize(typical_prices, edges) - 1, 0, bins - 1)
-        for idx, v in zip(bin_idx, eff_volumes):
-            hist_vol[idx] += float(v)
+        b_low_idx = np.clip(np.searchsorted(edges, lows, side="right") - 1, 0, bins - 1)
+        b_high_idx = np.clip(np.searchsorted(edges, highs, side="right") - 1, 0, bins - 1)
+        body_lo = np.minimum(opens, closes)
+        body_hi = np.maximum(opens, closes)
+        b_blo_idx = np.clip(np.searchsorted(edges, body_lo, side="right") - 1, 0, bins - 1)
+        b_bhi_idx = np.clip(np.searchsorted(edges, body_hi, side="right") - 1, 0, bins - 1)
+
+        for k in range(n):
+            v = float(eff_volumes[k])
+            if v <= 0.0:
+                continue
+            i0, i1 = int(b_low_idx[k]), int(b_high_idx[k])
+            if i0 >= i1:
+                hist_vol[i0] += v
+            else:
+                # 35% distributed across full [low, high] span, 65% across candle body [body_lo, body_hi]
+                span_cnt = i1 - i0 + 1
+                hist_vol[i0 : i1 + 1] += (0.35 * v) / span_cnt
+                bi0, bi1 = int(b_blo_idx[k]), int(b_bhi_idx[k])
+                body_cnt = max(bi1 - bi0 + 1, 1)
+                hist_vol[bi0 : bi1 + 1] += (0.65 * v) / body_cnt
 
         poc_idx = int(np.argmax(hist_vol))
         poc_price = float(centers[poc_idx])

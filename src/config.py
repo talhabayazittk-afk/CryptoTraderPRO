@@ -15,7 +15,7 @@ class ExchangeConfig:
     )
     symbol: str = "BTC/USDT"
     timeframe: str = "4h"
-    limit: int = 200
+    limit: int = 500
     timeout_ms: int = 15000
     orderbook_depth: int = 50
 

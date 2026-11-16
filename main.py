@@ -81,8 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=180,
-        help="Her zaman dilimi için çekilecek mum sayısı (varsayılan: 180)",
+        default=500,
+        help="Her zaman dilimi için çekilecek mum sayısı (varsayılan: 500 — EMA200/RSI tam ısınma)",
     )
     parser.add_argument(
         "--output",

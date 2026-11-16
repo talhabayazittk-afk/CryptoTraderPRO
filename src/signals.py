@@ -255,6 +255,22 @@ class MarketForecast:
     swing_structure_tr: str = "Yatay Kanal"
     candle_anatomy_tr: str = ""
     plain_guidance_tr: str = ""
+    data_health_ok: bool = True
+    data_health_status_tr: str = "✅ Doğrulanmış Canlı Borsa Verisi"
+    has_real_taker_flow: bool = False
+    # Phase 2 Standardized 1H/4H/24H Cash Flow, Z-Score Anomaly, Spot-Perp Quality & Macro Liquidity
+    spot_delta_1h_usd: Optional[float] = None
+    spot_delta_4h_usd: Optional[float] = None
+    spot_delta_24h_usd: Optional[float] = None
+    perp_delta_1h_usd: Optional[float] = None
+    perp_delta_4h_usd: Optional[float] = None
+    perp_delta_24h_usd: Optional[float] = None
+    flow_zscore: float = 0.0
+    flow_anomaly_tr: str = "Normal Nakit Akışı"
+    spot_perp_quality_tr: str = "Dengeli Spot & Vadeli Kalitesi"
+    macro_liquidity_tr: str = "Makro Likidite Dengeli"
+    aggregated_oi_usd: Optional[float] = None
+    oi_weighted_funding_pct: Optional[float] = None
 
 
 class SignalEngine:
@@ -1146,10 +1162,17 @@ class SignalEngine:
         supports = _dedup_levels(raw_supports)
         resistances = _dedup_levels(raw_resistances)
 
+        # Price Discovery Honest Fibonacci Extensions (Zero Fake Historical Pivots):
+        # Only used when price breaks into All-Time High / All-Time Low uncharted territory where <2 historical pivots exist.
+        fib_ext_multipliers = (1.272, 1.618)
         ext_step = max(atr_val * 1.45, min_level_gap * 1.25, current_price * 0.011)
+        sup_ext_idx = 0
         while len(supports) < min(2, max_levels):
+            fib_m = fib_ext_multipliers[min(sup_ext_idx, 1)]
+            sup_ext_idx += 1
+            cand_fib_sup = recent_high - fib_m * span_90 if span_90 > 0 else 0.0
             base_p = supports[-1].price if supports else current_price
-            ext_p = float(base_p - ext_step)
+            ext_p = float(cand_fib_sup) if (0 < cand_fib_sup < base_p - min_level_gap * 0.8) else float(base_p - ext_step)
             if ext_p <= 0:
                 break
             supports.append(
@@ -1158,32 +1181,36 @@ class SignalEngine:
                     band_low=ext_p - zone_half_width,
                     band_high=ext_p + zone_half_width,
                     level_type="DESTEK",
-                    touches=1,
-                    strength_label="🟢 Sıradan Destek (Güç: 35/100 • Alt Kanal ATR Uzatması)",
+                    touches=0,
+                    strength_label=f"🟢 Sıradan Destek (Güç: 30/100 • Fiyat Keşif Fib {fib_m:.3f} Uzatması)",
                     is_strong=False,
-                    strength_score=35.0,
+                    strength_score=30.0,
                     tier_tr="🟢 Sıradan Destek",
-                    confluence_tags=["Alt Kanal ATR Uzatması"],
-                    stats_summary_tr="Volatilite Uzatma Seviyesi",
+                    confluence_tags=[f"Fiyat Keşif Fib {fib_m:.3f} (Tarihsel Pivot Yok)"],
+                    stats_summary_tr="Tarihsel Dip Altı — Fibonacci Uzatma Projeksiyonu",
                 )
             )
 
+        res_ext_idx = 0
         while len(resistances) < min(2, max_levels):
+            fib_m = fib_ext_multipliers[min(res_ext_idx, 1)]
+            res_ext_idx += 1
+            cand_fib_res = recent_low + fib_m * span_90 if span_90 > 0 else 0.0
             base_p = resistances[-1].price if resistances else current_price
-            ext_p = float(base_p + ext_step)
+            ext_p = float(cand_fib_res) if (cand_fib_res > base_p + min_level_gap * 0.8) else float(base_p + ext_step)
             resistances.append(
                 SupportResistanceLevel(
                     price=ext_p,
                     band_low=ext_p - zone_half_width,
                     band_high=ext_p + zone_half_width,
                     level_type="DİRENÇ",
-                    touches=1,
-                    strength_label="🔴 Sıradan Direnç (Güç: 35/100 • Üst Kanal ATR Uzatması)",
+                    touches=0,
+                    strength_label=f"🔴 Sıradan Direnç (Güç: 30/100 • Fiyat Keşif Fib {fib_m:.3f} Uzatması)",
                     is_strong=False,
-                    strength_score=35.0,
+                    strength_score=30.0,
                     tier_tr="🔴 Sıradan Direnç",
-                    confluence_tags=["Üst Kanal ATR Uzatması"],
-                    stats_summary_tr="Volatilite Uzatma Seviyesi",
+                    confluence_tags=[f"Fiyat Keşif Fib {fib_m:.3f} (Üstte Tarihsel Direnç Yok)"],
+                    stats_summary_tr="Tarihsel Tepe Üstü — Fibonacci Uzatma Projeksiyonu",
                 )
             )
 
@@ -1572,13 +1599,21 @@ class SignalEngine:
         has_real_taker = bool(eval_row.get("has_real_taker_flow", False))
         vwap_val = float(eval_row.get("vwap_20", live_close))
 
-        poc_price = float(df["vp_poc"].iloc[-1]) if "vp_poc" in df.columns else live_close
-        vah_price = float(df["vp_vah"].iloc[-1]) if "vp_vah" in df.columns else live_close
-        val_price = float(df["vp_val"].iloc[-1]) if "vp_val" in df.columns else live_close
+        poc_price = float(eval_row.get("vp_poc", live_close)) if "vp_poc" in closed_df.columns else live_close
+        vah_price = float(eval_row.get("vp_vah", live_close)) if "vp_vah" in closed_df.columns else live_close
+        val_price = float(eval_row.get("vp_val", live_close)) if "vp_val" in closed_df.columns else live_close
 
-        recent_high = float(df["high"].tail(90).max())
-        recent_low = float(df["low"].tail(90).min())
+        recent_high = float(closed_df["high"].tail(90).max())
+        recent_low = float(closed_df["low"].tail(90).min())
         fib_618_price = recent_high - 0.618 * (recent_high - recent_low)
+
+        integrity_rep = df.attrs.get("integrity_report")
+        data_health_ok = bool(getattr(integrity_rep, "is_healthy", True)) if integrity_rep is not None else True
+        data_health_status_tr = (
+            str(getattr(integrity_rep, "status_tr", "✅ Doğrulanmış Canlı Borsa Verisi"))
+            if integrity_rep is not None
+            else f"✅ Doğrulanmış Veri ({len(closed_df)} Kapalı Mum)"
+        )
 
         notes: List[str] = []
 
@@ -1652,11 +1687,55 @@ class SignalEngine:
         cvd_div_tr, cvd_div_boost = self.detect_cvd_divergences(closed_df)
         mf_score += cvd_div_boost
 
+        # Phase 2A: Coin-Normalized Statistical Cash-Flow Z-Score Anomaly (-5..+5 sigma)
+        bar_z = float(eval_row.get("delta_zscore", 0.0)) if pd.notna(eval_row.get("delta_zscore", np.nan)) else 0.0
+        imp_z = float(eval_row.get("flow_impulse_z", 0.0)) if pd.notna(eval_row.get("flow_impulse_z", np.nan)) else 0.0
+        flow_zscore = float(np.clip(0.55 * imp_z + 0.45 * bar_z, -5.0, 5.0))
+        mf_score += float(np.clip(flow_zscore * 6.5, -16.0, 16.0))
+        if flow_zscore >= 2.0:
+            flow_anomaly_tr = f"🔥 Kurumsal Balina Alım Anomalisi ({flow_zscore:+.2f}σ — Normalin Üstünde Nakit Girişi)"
+        elif flow_zscore >= 1.0:
+            flow_anomaly_tr = f"🟢 Güçlü Nakit Giriş İvmesi ({flow_zscore:+.2f}σ)"
+        elif flow_zscore <= -2.0:
+            flow_anomaly_tr = f"🩸 Kurumsal Balina Boşaltma Anomalisi ({flow_zscore:+.2f}σ — Sert Nakit Çıkışı)"
+        elif flow_zscore <= -1.0:
+            flow_anomaly_tr = f"🔴 Belirgin Nakit Çıkış Baskısı ({flow_zscore:+.2f}σ)"
+        else:
+            flow_anomaly_tr = f"⚪ Normal Hacim Dağılımı ({flow_zscore:+.2f}σ)"
+
+        # Phase 2B: Time-Standardized 1H / 4H / 24H Cash Flow & Spot-vs-Perp Quality Matrix
+        spot_d1h: Optional[float] = order_flow.spot_delta_1h_usd if order_flow else None
+        spot_d4h: Optional[float] = order_flow.spot_delta_4h_usd if order_flow else None
+        spot_d24h: Optional[float] = order_flow.spot_delta_24h_usd if order_flow else None
+        perp_d1h: Optional[float] = order_flow.perp_delta_1h_usd if order_flow else None
+        perp_d4h: Optional[float] = order_flow.perp_delta_4h_usd if order_flow else None
+        perp_d24h: Optional[float] = order_flow.perp_cvd_delta_24h_usd if order_flow else None
+
+        if spot_d24h is None and has_real_taker and "net_money_delta_usd" in closed_df.columns and len(closed_df) >= 2:
+            if "timestamp" in closed_df.columns:
+                b_sec = max((pd.to_datetime(closed_df["timestamp"].iloc[-1]) - pd.to_datetime(closed_df["timestamp"].iloc[-2])).total_seconds(), 60.0)
+            else:
+                b_sec = 14400.0
+            n_1h = max(1, int(round(3600.0 / b_sec)))
+            n_4h = max(1, int(round(14400.0 / b_sec)))
+            n_24h = max(1, int(round(86400.0 / b_sec)))
+            spot_d1h = float(closed_df["net_money_delta_usd"].tail(n_1h).sum())
+            spot_d4h = float(closed_df["net_money_delta_usd"].tail(n_4h).sum())
+            spot_d24h = float(closed_df["net_money_delta_usd"].tail(n_24h).sum())
+
         oi_regime_tr = "Veri Yok"
         spot_perp_cvd_tr = "Dengeli Spot & Vadeli Akışı"
+        spot_perp_quality_tr = "⚖️ Dengeli Spot & Vadeli Akış Kalitesi"
+        agg_oi_usd: Optional[float] = None
+        oi_w_funding: Optional[float] = None
+
         if order_flow is not None:
+            agg_oi_usd = order_flow.aggregated_oi_usd or order_flow.open_interest_usd
+            oi_w_funding = order_flow.oi_weighted_funding_pct if order_flow.oi_weighted_funding_pct is not None else order_flow.funding_rate_pct
+            # Discount orderbook weight if flash spoofing was detected (>18% cancelled)
+            spoof_mult = 0.55 if order_flow.spoof_cancelled_pct >= 18.0 else 1.0
             ob_imb = order_flow.imbalance_net_ratio
-            mf_score += float(np.clip(ob_imb * 35.0, -18.0, 18.0))
+            mf_score += float(np.clip(ob_imb * 35.0 * spoof_mult, -18.0, 18.0))
             oi_regime_tr = order_flow.oi_regime_tr
             spot_perp_cvd_tr = order_flow.spot_vs_perp_cvd_tr
             eff_oi_chg = (
@@ -1664,19 +1743,45 @@ class SignalEngine:
                 if (order_flow.oi_change_4h_pct is not None and order_flow.oi_change_24h_pct is not None)
                 else order_flow.oi_change_24h_pct
             )
+            # Spot vs. Perp Foam / Quality Multiplier (Spot Smart Money overrides Retail Perp FOMO!)
+            spot_buying = (spot_d4h is not None and spot_d4h > 0) or (spot_d4h is None and cmf_val > 0.03)
+            spot_selling = (spot_d4h is not None and spot_d4h < 0) or (spot_d4h is None and cmf_val < -0.03)
+            perp_buying = (perp_d4h is not None and perp_d4h > 0) or (order_flow.futures_taker_buy_sell_ratio or 1.0) >= 1.04
+            perp_selling = (perp_d4h is not None and perp_d4h < 0) or (order_flow.futures_taker_buy_sell_ratio or 1.0) <= 0.96
+            fr_ref = oi_w_funding if oi_w_funding is not None else 0.0
+
+            if spot_d24h is not None:
+                mf_score += 10.0 if spot_d24h > 0 else (-10.0 if spot_d24h < 0 else 0.0)
+
             if eff_oi_chg is not None:
-                if eff_oi_chg > 1.2:
+                if eff_oi_chg > 1.2 and not spot_selling:
                     mf_score += 8.0 if live_close >= ema20 else -8.0
                 elif eff_oi_chg < -1.2 and live_close < ema20:
                     mf_score += 5.0  # Long capitulation / exhaustion
             if order_flow.futures_taker_buy_sell_ratio is not None:
-                if order_flow.futures_taker_buy_sell_ratio >= 1.05:
+                if order_flow.futures_taker_buy_sell_ratio >= 1.05 and not spot_selling:
                     mf_score += 9.0
-                elif order_flow.futures_taker_buy_sell_ratio <= 0.95:
+                elif order_flow.futures_taker_buy_sell_ratio <= 0.95 and not spot_buying:
                     mf_score -= 9.0
 
+            if spot_buying and fr_ref <= -0.003:
+                mf_score += 15.0
+                spot_perp_quality_tr = f"🚀 Short Squeeze Yakıtı (Spot Nakit Alıyor + Vadeli Fonlama Negatif %{fr_ref:+.4f})"
+            elif spot_buying and fr_ref <= 0.022:
+                mf_score += 9.0
+                spot_perp_quality_tr = "🟢 Sağlıklı Kurumsal Spot Öncülüğünde Alım (Kaldıraç Köpüğü Yok)"
+            elif spot_selling and (perp_buying or (fr_ref >= 0.015 and (eff_oi_chg or 0.0) >= 1.2)):
+                mf_score -= 18.0
+                spot_perp_quality_tr = "⚠️ KALDIRAÇ KÖPÜĞÜ / BOĞA TUZAĞI RİSKİ: Spot Mal Satarken Vadeli Long Şişiyor!"
+            elif spot_buying and perp_selling and (eff_oi_chg or 0.0) <= -1.0:
+                mf_score += 11.0
+                spot_perp_quality_tr = "🟢 Kurumsal Dip Toplama (Vadeli Panik Satışları Spotta Emiliyor)"
+            elif spot_selling and perp_selling:
+                mf_score -= 8.0
+                spot_perp_quality_tr = "🔴 Senkronize Spot & Vadeli Nakit Çıkışı"
+
         mf_score = float(np.clip(mf_score, -100.0, 100.0))
-        flow_src_tag = "Gerçek Taker CVD" if has_real_taker else "Hacim Akışı"
+        flow_src_tag = "Gerçek Taker CVD" if (has_real_taker or spot_d24h is not None) else "Mum Hacim Tahmini (Proxy)"
 
         if cmf_val > 0.04 and cvd_bull:
             money_flow_status_tr = f"NET PARA GİRİŞİ ({flow_src_tag}: Pozitif | CMF: {cmf_val:+.2f} | MFI: {mfi_val:.1f})"
@@ -1872,6 +1977,14 @@ class SignalEngine:
         if not symbol.startswith("BTC/") and btc_df is not None:
             macro_score += 0.15 * rs_metrics.alpha_score
             macro_parts.append(f"BTC Göreceli Güç (RS): {rs_metrics.rs_ratio_change_pct:+.1f}% (Beta: {rs_metrics.beta_vs_btc:.2f})")
+
+        macro_liquidity_tr = "Makro Likidite Dengeli"
+        if order_flow is not None and order_flow.macro_liquidity is not None:
+            ml = order_flow.macro_liquidity
+            macro_liquidity_tr = ml.summary_tr
+            if not symbol.startswith("BTC/"):
+                macro_score += ml.altcoin_season_bias
+            macro_parts.append(ml.summary_tr)
 
         macro_score = float(np.clip(macro_score, -100.0, 100.0))
         macro_context_tr = " | ".join(macro_parts) if macro_parts else "Bağımsız Zaman Dilimi Analizi"
@@ -2070,7 +2183,7 @@ class SignalEngine:
         # v6.0: WHALE ACCUMULATION / DISTRIBUTION BAROMETER (0..100),
         #       GLOBAL SESSION CLOCK, VOLATILITY SQUEEZE ENERGY & 3-STEP ALARM PLAN
         # ==================================================================
-        whale_raw = 50.0 + 0.35 * mf_score
+        whale_raw = 50.0 + 0.35 * mf_score + float(np.clip(flow_zscore * 4.5, -12.0, 12.0))
         if "BULL_ABSORPTION" in absorption_status_tr or "Alım Emilimi" in absorption_status_tr:
             whale_raw += 12.0
         elif "Satış Emilimi" in absorption_status_tr:
@@ -2365,7 +2478,11 @@ class SignalEngine:
             vp_bin_volumes=vp_vols,
             ema20_price=ema20,
             cmf_value=cmf_val,
-            net_delta_20_usd=float(df["net_money_delta_usd"].tail(20).sum()) if "net_money_delta_usd" in df.columns else 0.0,
+            net_delta_20_usd=(
+                float(spot_d24h)
+                if spot_d24h is not None
+                else (float(closed_df["net_money_delta_usd"].tail(20).sum()) if "net_money_delta_usd" in closed_df.columns else 0.0)
+            ),
             ob_imbalance_pct=float(order_flow.imbalance_pct) if order_flow is not None else 50.0,
             ob_bid_wall=order_flow.strongest_bid_wall if order_flow is not None else None,
             ob_ask_wall=order_flow.strongest_ask_wall if order_flow is not None else None,
@@ -2392,6 +2509,21 @@ class SignalEngine:
             swing_structure_tr=swing_structure_tr,
             candle_anatomy_tr=candle_anatomy_tr,
             plain_guidance_tr=plain_guidance_tr,
+            data_health_ok=data_health_ok,
+            data_health_status_tr=data_health_status_tr,
+            has_real_taker_flow=bool(has_real_taker or spot_d24h is not None),
+            spot_delta_1h_usd=spot_d1h,
+            spot_delta_4h_usd=spot_d4h,
+            spot_delta_24h_usd=spot_d24h,
+            perp_delta_1h_usd=perp_d1h,
+            perp_delta_4h_usd=perp_d4h,
+            perp_delta_24h_usd=perp_d24h,
+            flow_zscore=flow_zscore,
+            flow_anomaly_tr=flow_anomaly_tr,
+            spot_perp_quality_tr=spot_perp_quality_tr,
+            macro_liquidity_tr=macro_liquidity_tr,
+            aggregated_oi_usd=agg_oi_usd,
+            oi_weighted_funding_pct=oi_w_funding,
         )
 
     @staticmethod

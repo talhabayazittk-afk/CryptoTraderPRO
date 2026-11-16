@@ -26,6 +26,7 @@ import src.smart_money
 import src.signals
 import src.visualizer
 import src.telegram_notifier
+import src.x_publisher
 
 # Hot-reload submodules automatically if an older module is still cached in a running Streamlit process
 if (
@@ -40,6 +41,7 @@ if (
     or not hasattr(src.signals, "FuturesSetupReport")
     or not hasattr(src.signals.MarketForecast, "sr_breakout_guide_tr")
     or not hasattr(src.signals.MarketForecast, "plain_guidance_tr")
+    or not hasattr(src.x_publisher, "publish_x_content")
 ):
     for _mod in (
         src.config,
@@ -50,6 +52,7 @@ if (
         src.signals,
         src.visualizer,
         src.telegram_notifier,
+        src.x_publisher,
         src,
     ):
         try:
@@ -84,6 +87,25 @@ from src.telegram_notifier import (
     send_telegram_photo,
     start_bot_background,
     stop_bot_background,
+)
+from src.x_publisher import (
+    build_x_intent_url,
+    copy_chart_png_to_windows_clipboard,
+    format_breakout_radar_x_post,
+    format_coin_analysis_x_post,
+    format_futures_radar_x_post,
+    format_futures_setup_x_post,
+    format_market_overview_x_post,
+    format_screener_x_post,
+    get_x_daily_post_count,
+    is_x_configured,
+    load_x_config,
+    load_x_state,
+    post_x_tweet,
+    publish_x_content,
+    save_x_config,
+    save_x_state,
+    x_weighted_length,
 )
 
 
@@ -355,7 +377,7 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v10.0",
+    _engine_version: str = "v12.0_phase2",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
     Parallel cached pipeline (v3.0):
@@ -450,11 +472,12 @@ with st.sidebar:
     )
 
     candle_limit = st.slider(
-        "Analiz Edilecek Mum Sayısı",
-        min_value=100,
-        max_value=400,
-        value=200,
+        "Analiz Edilecek Mum Sayısı (EMA 200 & İndikatör Isınması)",
+        min_value=250,
+        max_value=1000,
+        value=500,
         step=50,
+        help="EMA 200, Wilder RSI(14), ADX(14) ve SuperTrend değerlerinin TradingView ile birebir örtüşmesi için en az 500 mum önerilir.",
     )
 
     st.markdown("---")
@@ -587,25 +610,184 @@ with st.sidebar:
             else:
                 st.warning(msg_t)
 
+    st.markdown("---")
+    st.markdown("### 🐦 X (Twitter) Otomatik Paylaşım Merkezi")
+    x_cfg = load_x_config()
+    x_state = load_x_state()
+
+    with st.expander("ℹ️ X API Anahtarları Nasıl Alınır? (Ücretsiz)", expanded=False):
+        st.markdown(
+            """
+            1. **[developer.x.com](https://developer.x.com/en/portal/dashboard)** adresinden ücretsiz bir Developer hesabı ve Proje/Uygulama açın.
+            2. **User authentication settings** kısmından uygulama iznini **Read and Write** (Okuma ve Yazma) yapın.
+            3. **Keys and tokens** sekmesinden:
+               - **API Key and Secret** (Consumer Keys)
+               - **Access Token and Secret** (Read & Write yetkili)
+               kodlarını alıp aşağıdaki 4 kutuya yapıştırıp **💾 X Ayarlarını Kaydet** butonuna basın.
+            """
+        )
+
+    x_api_key_in = st.text_input(
+        "X API Key (Consumer Key)",
+        value=x_cfg.get("api_key", ""),
+        type="password",
+        placeholder="Örn: aBcDeFg123...",
+    )
+    x_api_secret_in = st.text_input(
+        "X API Secret (Consumer Secret)",
+        value=x_cfg.get("api_secret", ""),
+        type="password",
+        placeholder="Örn: xYz987...",
+    )
+    x_acc_token_in = st.text_input(
+        "X Access Token",
+        value=x_cfg.get("access_token", ""),
+        type="password",
+        placeholder="Örn: 12345678-AbCd...",
+    )
+    x_acc_secret_in = st.text_input(
+        "X Access Token Secret",
+        value=x_cfg.get("access_token_secret", ""),
+        type="password",
+        placeholder="Örn: sEcReT123...",
+    )
+
+    x_mode_options = {
+        "SHORT_280": "🐦 Tek Gönderi (≤280 Karakter + Grafik) [Ücretsiz/Standart X]",
+        "THREAD": "🧵 2 Tweetlik Zincir / Flood (+ Grafik) [Standart X Detaylı]",
+        "LONG_PREMIUM": "💎 X Premium Uzun Gönderi (+ Grafik)",
+    }
+    curr_x_mode = str(x_state.get("x_post_mode", "SHORT_280")).upper()
+    if curr_x_mode not in x_mode_options:
+        curr_x_mode = "SHORT_280"
+    x_mode_sel = st.selectbox(
+        "📝 X Paylaşım Formatı",
+        options=list(x_mode_options.keys()),
+        format_func=lambda k: x_mode_options[k],
+        index=list(x_mode_options.keys()).index(curr_x_mode),
+    )
+
+    x_chart_chk = st.checkbox(
+        "🖼️ X Gönderilerine Otomatik Grafik Görseli (PNG) Ekle",
+        value=bool(x_state.get("x_attach_chart", True)),
+        help="Telegram'da olduğu gibi X paylaşımlarına da koyu tema teknik analiz grafiğini otomatik yükler.",
+    )
+    x_radar_chk = st.checkbox(
+        "📡 7/24 Otomatik X Kırılım & Balina Radarı Paylaşımı",
+        value=bool(x_state.get("x_auto_radar_enabled", True)),
+        help="Arka plan botu çalışırken tespit edilen güçlü direnç/destek kırılımlarını, tuzakları (SFP) ve balina hareketlerini grafikle birlikte otomatik olarak X hesabınızda paylaşır.",
+    )
+    x_sess_chk = st.checkbox(
+        "🌅 Otomatik Seans Özeti X Paylaşımı (09:00 & 16:30)",
+        value=bool(x_state.get("x_auto_session_bulletin", True)),
+        help="Her gün 09:00 ve ABD açılışı 16:30'da küresel piyasa ve sıcak para akışı özetini X'te otomatik paylaşır.",
+    )
+    x_max_daily_in = st.slider(
+        "Günlük Maksimum Otomatik X Gönderi Limiti",
+        min_value=1,
+        max_value=17,
+        value=int(x_state.get("x_max_daily_posts", 15)),
+        help="X Ücretsiz API katmanı 24 saatte ~17 gönderiye izin verir. Bu limit kotanızın dolmasını engeller.",
+    )
+    x_tags_in = st.text_input(
+        "🏷️ Varsayılan X Etiketleri (Hashtag)",
+        value=str(x_state.get("x_custom_hashtags", "#Kripto #Bitcoin")),
+    )
+
+    if (
+        x_mode_sel != x_state.get("x_post_mode")
+        or x_chart_chk != bool(x_state.get("x_attach_chart", True))
+        or x_radar_chk != bool(x_state.get("x_auto_radar_enabled", True))
+        or x_sess_chk != bool(x_state.get("x_auto_session_bulletin", True))
+        or x_max_daily_in != int(x_state.get("x_max_daily_posts", 15))
+        or x_tags_in != str(x_state.get("x_custom_hashtags", "#Kripto #Bitcoin"))
+    ):
+        x_state["x_post_mode"] = x_mode_sel
+        x_state["x_attach_chart"] = x_chart_chk
+        x_state["x_auto_radar_enabled"] = x_radar_chk
+        x_state["x_auto_session_bulletin"] = x_sess_chk
+        x_state["x_max_daily_posts"] = x_max_daily_in
+        x_state["x_custom_hashtags"] = x_tags_in
+        save_x_state(x_state)
+
+    xb1, xb2 = st.columns(2)
+    with xb1:
+        if st.button("💾 X Ayarlarını Kaydet", use_container_width=True):
+            if save_x_config(x_api_key_in, x_api_secret_in, x_acc_token_in, x_acc_secret_in):
+                st.success("✅ X API Anahtarları kaydedildi!")
+            else:
+                st.error("X ayarları kaydedilemedi.")
+    with xb2:
+        if st.button("🧪 X Test Paylaşımı", use_container_width=True):
+            save_x_config(x_api_key_in, x_api_secret_in, x_acc_token_in, x_acc_secret_in)
+            test_cfg = {
+                "api_key": x_api_key_in,
+                "api_secret": x_api_secret_in,
+                "access_token": x_acc_token_in,
+                "access_token_secret": x_acc_secret_in,
+            }
+            now_hm_s = pd.Timestamp.now().strftime("%H:%M")
+            test_tw = (
+                f"🤖 Akıllı Kripto Karar-Destek & Kırılım Radarı Terminali X Bağlantısı Aktif! ({now_hm_s})\n"
+                "📊 7/24 Otomatik Destek/Direnç Kırılım, Balina & Likidasyon Analizleri\n"
+                "⚖️ YTD #Kripto #Bitcoin"
+            )
+            ok_xt, msg_xt, _ = post_x_tweet(test_tw, cfg=test_cfg)
+            if ok_xt:
+                st.success(msg_xt)
+            else:
+                st.markdown(msg_xt)
+
+    x_ready_now = is_x_configured(
+        {
+            "api_key": x_api_key_in,
+            "api_secret": x_api_secret_in,
+            "access_token": x_acc_token_in,
+            "access_token_secret": x_acc_secret_in,
+        }
+    )
+    x_daily_used = get_x_daily_post_count(x_state)
+    if x_ready_now:
+        st.caption(
+            f"🟢 **X API Durumu:** Bağlı / Hazır | **Bugün Paylaşılan:** `{x_daily_used}/{x_max_daily_in}` | **Otomatik Radar:** `{'AÇIK' if x_radar_chk else 'KAPALI'}`"
+        )
+    else:
+        st.caption("⚪ **X API Durumu:** Anahtarlar henüz girilmedi.")
+
+    x_hist = x_state.get("x_post_history", [])
+    if x_hist:
+        with st.expander(f"📜 Son Paylaşılan X Gönderileri ({len(x_hist)})", expanded=False):
+            for h_item in x_hist[:8]:
+                st.markdown(
+                    f"- `{h_item.get('time', '')}` **{h_item.get('title', '')}** — [🔗 X'te Gör]({h_item.get('url', '#')})"
+                )
+
+    st.markdown("---")
     bot_alive, bot_pid = is_bot_running()
-    if not bot_alive and tg_token_input.strip() and not st.session_state.get("bot_manually_stopped", False):
+    if (
+        not bot_alive
+        and (tg_token_input.strip() or x_ready_now)
+        and not st.session_state.get("bot_manually_stopped", False)
+    ):
         save_telegram_config(tg_token_input, tg_chat_input)
+        save_x_config(x_api_key_in, x_api_secret_in, x_acc_token_in, x_acc_secret_in)
         start_bot_background()
         bot_alive, bot_pid = is_bot_running()
 
     if bot_alive:
-        st.caption(f"🟢 **Bot Durumu:** Arka Planda Çalışıyor (PID: `{bot_pid}`) | Aktif Alarm: `{len(tg_state.get('alarms', []))}`")
+        st.caption(f"🟢 **7/24 Arka Plan Botu (Telegram + X Radar):** Çalışıyor (PID: `{bot_pid}`) | Aktif Alarm: `{len(tg_state.get('alarms', []))}`")
     else:
-        st.caption("🔴 **Bot Durumu:** Şu An Kapalı (Dokunmatik butonların çalışması için başlatın)")
+        st.caption("🔴 **7/24 Arka Plan Botu:** Şu An Kapalı (Otomatik Telegram & X Radarı için başlatın)")
 
     bot_c1, bot_c2 = st.columns(2)
     with bot_c1:
         if st.button("▶️ Botu Başlat", use_container_width=True):
-            if not tg_token_input.strip():
-                st.warning("Önce Telegram Bot Token girip kaydedin.")
+            if not tg_token_input.strip() and not x_ready_now:
+                st.warning("Önce Telegram Bot Token veya X API Anahtarlarınızı girip kaydedin.")
             else:
                 st.session_state["bot_manually_stopped"] = False
                 save_telegram_config(tg_token_input, tg_chat_input)
+                save_x_config(x_api_key_in, x_api_secret_in, x_acc_token_in, x_acc_secret_in)
                 ok_b, msg_b = start_bot_background()
                 if ok_b:
                     st.success(msg_b)
@@ -845,6 +1027,49 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
                 else:
                     st.warning(status_fr)
 
+        x_sc1, x_sc2, x_sc3 = st.columns([1, 1, 1])
+        with x_sc1:
+            if st.button("🐦 Tarama Raporunu X'te Paylaş", use_container_width=True):
+                tweets_sc = format_screener_x_post(screener_rows, "4H", False)
+                top_sym = screener_rows[0]["Coin"]
+                top_df, top_fcs, _, _ = all_coin_results[top_sym]
+                top_png = generate_telegram_chart_png(top_df["4H"], top_fcs["4H"], top_sym, "4H", include_futures_levels=False)
+                ok_xs, msg_xs, _ = publish_x_content(tweets_sc, photo_bytes=top_png, title="Çoklu Coin Tarama (4H)", symbol="TARAMA")
+                if ok_xs:
+                    st.success(msg_xs)
+                else:
+                    st.warning(msg_xs)
+        with x_sc2:
+            if st.button("🐦 Kırılım Radarını X'te Paylaş", use_container_width=True):
+                brk_entries_x = [
+                    {"symbol": r["Coin"], "price": r["_raw_price"], "fc": r["_fc_4h"]}
+                    for r in screener_rows
+                ]
+                tweets_brk = format_breakout_radar_x_post(brk_entries_x, "4H")
+                top_sym = screener_rows[0]["Coin"]
+                top_df, top_fcs, _, _ = all_coin_results[top_sym]
+                top_png = generate_telegram_chart_png(top_df["4H"], top_fcs["4H"], top_sym, "4H", include_futures_levels=False)
+                ok_xb, msg_xb, _ = publish_x_content(tweets_brk, photo_bytes=top_png, title="Kırılım Radarı (4H)", symbol="KIRILIM")
+                if ok_xb:
+                    st.success(msg_xb)
+                else:
+                    st.warning(msg_xb)
+        with x_sc3:
+            if st.button("🐦 Vadeli İşlem Radarını X'te Paylaş", use_container_width=True):
+                fut_entries_x = [
+                    {"symbol": r["Coin"], "price": r["_raw_price"], "fc": r["_fc_4h"]}
+                    for r in screener_rows
+                ]
+                tweets_fut_r = format_futures_radar_x_post(fut_entries_x, "4H")
+                top_sym = screener_rows[0]["Coin"]
+                top_df, top_fcs, _, _ = all_coin_results[top_sym]
+                top_png = generate_telegram_chart_png(top_df["4H"], top_fcs["4H"], top_sym, "4H", include_futures_levels=True)
+                ok_xf, msg_xf, _ = publish_x_content(tweets_fut_r, photo_bytes=top_png, title="Vadeli İşlem Radarı (4H)", symbol="VADELİ")
+                if ok_xf:
+                    st.success(msg_xf)
+                else:
+                    st.warning(msg_xf)
+
 # ---------------------------------------------------------------------------
 # DETAILED SINGLE-COIN INSPECTOR (CLEAN, CONCISE & JARGON-FREE LAYOUT)
 # ---------------------------------------------------------------------------
@@ -912,10 +1137,105 @@ with col_sel3:
             st.success(msg_c)
         else:
             st.warning(msg_c)
+    if st.button(f"🐦 {active_symbol} ({active_tf}) X'te Paylaş (Grafikli)", use_container_width=True):
+        mtf_sc_x = {k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts}
+        tweets_coin = format_coin_analysis_x_post(
+            fc=fc_active,
+            symbol=active_symbol,
+            timeframe=active_tf,
+            current_price=last_price,
+            mtf_scores=mtf_sc_x,
+        )
+        png_bytes_x = generate_telegram_chart_png(
+            df_active,
+            fc_active,
+            active_symbol,
+            active_tf,
+            include_futures_levels=False,
+        )
+        ok_xc, msg_xc, _ = publish_x_content(
+            tweets=tweets_coin,
+            photo_bytes=png_bytes_x,
+            title=f"{active_symbol} ({active_tf}) Teknik Analiz",
+            symbol=active_symbol,
+        )
+        if ok_xc:
+            st.success(msg_xc)
+        else:
+            st.markdown(msg_xc)
+
+with st.expander(f"🐦 {active_symbol} ({active_tf}) X (Twitter) Gönderi Önizlemesi & Özelleştirerek Paylaş", expanded=False):
+    mtf_sc_prev = {k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts}
+    preview_tweets = format_coin_analysis_x_post(
+        fc=fc_active,
+        symbol=active_symbol,
+        timeframe=active_tf,
+        current_price=last_price,
+        mtf_scores=mtf_sc_prev,
+    )
+    default_tw_text = "\n\n---\n\n".join(preview_tweets) if len(preview_tweets) > 1 else preview_tweets[0]
+    custom_tw_text = st.text_area(
+        "Paylaşılacak X Metni (İsterseniz düzenleyebilirsiniz; '---' ile ayrılan bölümler Zincir/Flood modunda ayrı tweet olarak atılır):",
+        value=default_tw_text,
+        height=175,
+        key=f"x_custom_tw_{active_symbol}_{active_tf}",
+    )
+    first_part = custom_tw_text.split("---")[0].strip()
+    w_len = x_weighted_length(first_part)
+    st.caption(
+        f"📏 **1. Tweet Karakter Ağırlığı:** `{w_len} / 280` "
+        f"({'🟢 Standart X Limitine Uygun' if w_len <= 280 else '⚠️ 280 Karakteri Aşıyor (Otomatik Kısaltılır veya X Premium Gerekir)'})"
+    )
+    x_pcol1, x_pcol2 = st.columns(2)
+    with x_pcol1:
+        if st.button(f"🚀 API ile {active_symbol} ({active_tf}) Şimdi X'te Paylaş", use_container_width=True):
+            parts_custom = [p.strip() for p in custom_tw_text.split("---") if p.strip()]
+            png_custom = generate_telegram_chart_png(
+                df_active,
+                fc_active,
+                active_symbol,
+                active_tf,
+                include_futures_levels=False,
+            )
+            ok_cust, msg_cust, _ = publish_x_content(
+                tweets=parts_custom,
+                photo_bytes=png_custom,
+                title=f"{active_symbol} ({active_tf}) Özel Analiz",
+                symbol=active_symbol,
+            )
+            if ok_cust:
+                st.success(msg_cust)
+            else:
+                st.info(msg_cust)
+    with x_pcol2:
+        if st.button(f"🆓 Ücretsiz X'te Hazırla + Grafiği Panoya Kopyala (Ctrl+V)", use_container_width=True):
+            png_free = generate_telegram_chart_png(
+                df_active,
+                fc_active,
+                active_symbol,
+                active_tf,
+                include_futures_levels=False,
+            )
+            clip_ok = copy_chart_png_to_windows_clipboard(png_free)
+            intent_u = build_x_intent_url(first_part)
+            st.success(
+                f"✅ {'Grafik görseli Windows panonuza (Ctrl+V) kopyalandı! ' if clip_ok else ''}"
+                f"Şimdi 👉 **[🐦 Buraya Tıklayarak X Gönderi Ekranını Hazır Metinle Açın]({intent_u})** ve **`Ctrl+V`** tuşuna basıp grafiği yapıştırarak ücretsiz paylaşın!"
+            )
 
 # ---------------------------------------------------------------------------
 # 1. COMPACT STATUS & MULTI-TIMEFRAME ALIGNMENT BAR
 # ---------------------------------------------------------------------------
+data_health_lbl = getattr(fc_active, "data_health_status_tr", "✅ Doğrulanmış Canlı Borsa Verisi")
+spot_src_lbl = getattr(order_flow, "spot_source", "") or source_used
+fut_src_lbl = getattr(order_flow, "futures_source", "") or "Yok"
+macro_liq_lbl = getattr(fc_active, "macro_liquidity_tr", "")
+st.caption(
+    f"🛡️ **Veri Sağlığı & Kaynak Denetimi:** `{data_health_lbl}` &nbsp;|&nbsp; "
+    f"**Spot:** `{spot_src_lbl}` &nbsp;|&nbsp; **Küresel Vadeli:** `{fut_src_lbl}`"
+    + (f" &nbsp;|&nbsp; **🌍 Makro Pusula:** {macro_liq_lbl}" if macro_liq_lbl and macro_liq_lbl != "Makro Likidite Dengeli" else "")
+)
+
 trend_state_act = getattr(fc_active, "trend_state", "")
 swing_struct_act = getattr(fc_active, "swing_structure_tr", "Yatay Kanal")
 candle_anat_act = getattr(fc_active, "candle_anatomy_tr", "")
@@ -1181,18 +1501,53 @@ with c2:
     )
 
 with c3:
-    has_real_taker_col = bool(last_row.get("has_real_taker_flow", False))
-    delta_label_tr = "Son 20 Mum Nakit (Gerçek Taker)" if has_real_taker_col else "Son 20 Mum Nakit (Hacim Tahmini)"
+    def _fmt_usd_flow(v: Optional[float]) -> str:
+        if v is None or pd.isna(v):
+            return "N/A"
+        if abs(v) >= 1_000_000_000:
+            return f"{v / 1_000_000_000:+,.2f}B$"
+        if abs(v) >= 1_000_000:
+            return f"{v / 1_000_000:+,.1f}M$"
+        if abs(v) >= 1_000:
+            return f"{v / 1_000:+,.1f}K$"
+        return f"{v:+,.0f}$"
+
+    sp_1h = getattr(fc_active, "spot_delta_1h_usd", None)
+    sp_4h = getattr(fc_active, "spot_delta_4h_usd", None)
+    sp_24h = getattr(fc_active, "spot_delta_24h_usd", None)
+    pp_24h = getattr(fc_active, "perp_delta_24h_usd", None)
+    fz_val = getattr(fc_active, "flow_zscore", 0.0)
+    sp_qual = getattr(fc_active, "spot_perp_quality_tr", "")
+    agg_oi = getattr(fc_active, "aggregated_oi_usd", None)
+
+    if sp_24h is not None:
+        flow_row_html = (
+            f"• 💵 <b>Spot Gerçek Nakit (1S / 4S / 24S):</b> "
+            f"<b>{_fmt_usd_flow(sp_1h)}</b> / <b>{_fmt_usd_flow(sp_4h)}</b> / <b>{_fmt_usd_flow(sp_24h)}</b><br>"
+        )
+    else:
+        flow_row_html = f"• 💵 <b>Hacim Tahmini Akış (Proxy):</b> <b>{delta_fmt_str}</b><br>"
+
+    perp_oi_html = ""
+    if pp_24h is not None or agg_oi is not None:
+        p_bits = []
+        if pp_24h is not None:
+            p_bits.append(f"24S Vadeli Taker: <b>{_fmt_usd_flow(pp_24h)}</b>")
+        if agg_oi is not None and agg_oi > 0:
+            p_bits.append(f"Küresel OI: <b>{_fmt_usd_flow(agg_oi).lstrip('+')}</b>")
+        perp_oi_html = f"• ⚡ {' | '.join(p_bits)}<br>"
+
+    qual_html = f"• 🧪 <b>Akış Kalitesi:</b> {sp_qual}<br>" if sp_qual else ""
+    spoof_short = "⚠️ Spoof Temizlendi" if getattr(order_flow, "spoof_cancelled_pct", 0.0) >= 18.0 else "✅ Kalıcı Derinlik"
+
     st.markdown(
         f"""
         <div class="kpi-card" style="border-top: 4px solid {mf_col};">
-            <div class="kpi-title">3️⃣ PARA GİRİŞ / ÇIKIŞI & BALİNALAR</div>
-            <div class="kpi-value" style="color:{mf_col};">{mf_headline}</div>
-            <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                • 💵 <b>{delta_label_tr}:</b> <b>{delta_fmt_str}</b><br>
-                • 🐋 <b>Balina Durumu:</b> {whale_short}<br>
-                • 📘 <b>Bekleyen Emirler:</b> <b>%{order_flow.imbalance_pct:.0f} Alıcı</b> / %{100 - order_flow.imbalance_pct:.0f} Satıcı<br>
-                • 🧱 <b>Duvarlar:</b> Alış <b style="color:#00E676;">{price_fmt(order_flow.strongest_bid_wall)}</b> | Satış <b style="color:#FF5252;">{price_fmt(order_flow.strongest_ask_wall)}</b>
+            <div class="kpi-title">3️⃣ GERÇEK NAKİT GİRİŞ/ÇIKIŞI (1S/4S/24S) & BALİNA</div>
+            <div class="kpi-value" style="color:{mf_col};">{mf_headline} <span style="font-size:13px; color:#94A3B8;">({fz_val:+.2f}σ)</span></div>
+            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
+                {flow_row_html}{perp_oi_html}{qual_html}• 🐋 <b>Balina:</b> {whale_short}<br>
+                • 📘 <b>Emir Defteri ({spoof_short}):</b> <b>%{order_flow.imbalance_pct:.0f} Alış</b> (<b style="color:#00E676;">{price_fmt(order_flow.strongest_bid_wall)}</b> / <b style="color:#FF5252;">{price_fmt(order_flow.strongest_ask_wall)}</b>)
             </div>
         </div>
         """,
@@ -1303,6 +1658,30 @@ if fut_active is not None:
                 st.success("✅ Vadeli İşlem Planı ve Grafiği Telegram'a gönderildi!")
             else:
                 st.warning(msg_ftg)
+        if st.button(f"🐦 {active_symbol} ({active_tf}) Vadeli Planı X'te Paylaş", use_container_width=True):
+            fut_tweets_x = format_futures_setup_x_post(
+                fc=fc_active,
+                symbol=active_symbol,
+                timeframe=active_tf,
+                current_price=last_price,
+            )
+            fut_png_x = generate_telegram_chart_png(
+                df_active,
+                fc_active,
+                active_symbol,
+                active_tf,
+                include_futures_levels=True,
+            )
+            ok_fx, msg_fx, _ = publish_x_content(
+                tweets=fut_tweets_x,
+                photo_bytes=fut_png_x,
+                title=f"{active_symbol} ({active_tf}) Vadeli Planı",
+                symbol=active_symbol,
+            )
+            if ok_fx:
+                st.success(msg_fx)
+            else:
+                st.info(msg_fx)
 
     if fut_active.is_tradeable:
         fc_f1, fc_f2, fc_f3 = st.columns(3)

@@ -74,6 +74,22 @@ from src.telegram_notifier import (
     send_telegram_message,
     send_telegram_photo,
 )
+from src.x_publisher import (
+    build_x_intent_url,
+    format_breakout_radar_x_post,
+    format_coin_analysis_x_post,
+    format_futures_radar_x_post,
+    format_futures_setup_x_post,
+    format_market_overview_x_post,
+    format_radar_alert_x_post,
+    format_screener_x_post,
+    get_x_daily_post_count,
+    is_x_configured,
+    load_x_config,
+    load_x_state,
+    publish_x_content,
+    save_x_state,
+)
 
 
 def _bot_fallback_build_breakout_radar_kb(entries: List[Dict[str, Any]], timeframe: str = "4H") -> Dict[str, Any]:
@@ -266,17 +282,17 @@ def _compute_full_coin_bundle(
             btc_scores_ref = None
 
     cfg = AnalysisConfig(
-        exchange=ExchangeConfig(primary_exchange=ex_choice, symbol=sym_key, timeframe=tf, limit=200),
+        exchange=ExchangeConfig(primary_exchange=ex_choice, symbol=sym_key, timeframe=tf, limit=500),
     )
     fetcher = CryptoDataFetcher(cfg.exchange)
 
-    # Fetch 4 timeframes AND OrderFlowIntel concurrently
+    # Fetch 4 timeframes (500-bar institutional warmup) AND OrderFlowIntel concurrently
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_tf = ex.submit(
             fetcher.fetch_multi_timeframe_parallel,
             symbol=sym_key,
             timeframes=["15m", "1h", "4h", "1d"],
-            limit=200,
+            limit=500,
             exchange_id=ex_choice,
             allow_synthetic_fallback=allow_synthetic_fallback,
         )
@@ -529,11 +545,17 @@ def _build_alarm_radar_status_html(state: Dict[str, Any]) -> str:
     radar_on = bool(state.get("radar_enabled", True))
     sess_on = bool(state.get("auto_session_summary", True))
     alarms = state.get("alarms", [])
+    x_st = load_x_state()
+    x_radar_on = bool(x_st.get("x_auto_radar_enabled", True))
+    x_cfg_ok = is_x_configured()
+    x_daily_n = get_x_daily_post_count(x_st)
+    x_max_n = int(x_st.get("x_max_daily_posts", 15))
 
     lines = [
-        "⏰ <b>AKILLI ALARM &amp; 7/24 RADAR MERKEZİ</b>",
+        "⏰ <b>AKILLI ALARM &amp; 7/24 RADAR MERKEZİ (TELEGRAM + X)</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📡 <b>7/24 Kırılım &amp; Balina Radarı (4H):</b> {'🟢 <b>AÇIK</b> (Otomatik Tarama Aktif)' if radar_on else '🔴 <b>KAPALI</b>'}",
+        f"📡 <b>Telegram 7/24 Kırılım Radarı (4H):</b> {'🟢 <b>AÇIK</b> (Otomatik Tarama Aktif)' if radar_on else '🔴 <b>KAPALI</b>'}",
+        f"🐦 <b>X (Twitter) 7/24 Otomatik Radar:</b> {'🟢 <b>AÇIK</b>' if (x_radar_on and x_cfg_ok) else ('⚠️ <b>AÇIK (API Anahtarı Eksik)</b>' if x_radar_on else '⚪ <b>KAPALI</b>')} <i>(Bugün: {x_daily_n}/{x_max_n})</i>",
         f"🌅 <b>Otomatik Seans Özeti (09:00 &amp; 16:30):</b> {'🟢 <b>AÇIK</b>' if sess_on else '⚪ <b>KAPALI</b>'}",
         "",
         f"🔔 <b>AKTİF FİYAT ALARMLARINIZ ({len(alarms)} Adet):</b>",
@@ -549,7 +571,7 @@ def _build_alarm_radar_status_html(state: Dict[str, Any]) -> str:
             note = a.get("note", "")
             lines.append(f"{idx}. <b>{sym}</b> ➔ <code>{format(tp, p_fmt)} USDT</code> ({note})")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━\n<i>👇 Alttaki dokunmatik butonlarla Radar ve Alarmlarınızı yönetebilirsiniz:</i>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━\n<i>👇 Alttaki dokunmatik butonlarla Telegram &amp; X Radar ve Alarmlarınızı yönetebilirsiniz:</i>")
     return "\n".join(lines)
 
 
@@ -589,9 +611,13 @@ def _build_help_html(chat_id: str) -> str:
         "• <code>/ekle PEPE RENDER</code> — Borsada doğrulayarak izleme listenize yeni coin(ler) ekler\n"
         "• <code>/sil ENA</code> veya <code>/cikar ENA</code> — Coini izleme listenizden çıkarır\n"
         "• <code>/liste</code> — Tıklanabilir Coin Seçim &amp; 1-Tıkla Coin Ekle/Çıkar Menüsü (4H)\n\n"
-        "⏰ <b>Alarm &amp; 7/24 Otomatik Radar:</b>\n"
+        "⏰ <b>Alarm &amp; 7/24 Otomatik Radar (Telegram + X):</b>\n"
         "• <code>/alarm ONDO 0.3620</code> — Hedef Fiyata Anlık Bildirim Alarmı Kurar\n"
-        "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n"
+        "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n\n"
+        "🐦 <b>X (Twitter) Otomatik &amp; Tek Tıkla Paylaşım Komutları:</b>\n"
+        "• <code>/x ONDO 4h</code> — Coinin analizini ve grafiğini anında X hesabınızda paylaşır\n"
+        "• <code>/xvadeli ONDO 4h</code> — Vadeli İşlem Planını ve grafiğini X'te paylaşır\n"
+        "• <code>/xtara 4h</code> | <code>/xkirilim 4h</code> | <code>/xpiyasa 4h</code> — Tarama ve Piyasa raporunu X'te paylaşır\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 <b>Chat ID:</b> <code>{chat_id}</code> (Yatırım tavsiyesi değildir - YTD)"
     )
@@ -665,24 +691,38 @@ def _check_price_alarms(bot_token: str, chat_id: str) -> None:
 def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False) -> int:
     """
     Scans watchlist in parallel on 4H default timeframe and alerts on high-conviction events
-    with a mandatory chart PNG (without futures TP/Stop lines).
+    with a mandatory chart PNG (without futures TP/Stop lines) to both Telegram and X (Twitter).
     """
     state = load_telegram_state()
-    if not force and not state.get("radar_enabled", True):
-        return 0
-    if not chat_id:
+    x_st = load_x_state()
+    x_cfg = load_x_config()
+    tg_active = bool(bot_token and chat_id and (force or state.get("radar_enabled", True)))
+    x_active = bool(is_x_configured(x_cfg) and (force or x_st.get("x_auto_radar_enabled", True)))
+
+    if not tg_active and not x_active:
         return 0
 
     _, _, results = _scan_watchlist_parallel("4h", only_high_quality=False)
     cooldowns: Dict[str, float] = state.get("radar_cooldowns", {})
+    x_cooldowns: Dict[str, float] = x_st.get("x_cooldowns", {})
+    x_cd_sec = float(x_st.get("x_coin_cooldown_sec", 14400))
+    x_max_daily = int(x_st.get("x_max_daily_posts", 15))
     now_ts = time.time()
     alerts_sent = 0
+    x_posts_sent = 0
 
     for r in results:
         sym = r["symbol"]
         fc: MarketForecast = r["fc"]
-        last_sent = float(cooldowns.get(sym, 0.0))
-        if not force and (now_ts - last_sent) < 7200:  # 2 hours cooldown per coin
+        last_sent_tg = float(cooldowns.get(sym, 0.0))
+        last_sent_x = float(x_cooldowns.get(sym, 0.0))
+        can_send_tg = tg_active and (force or (now_ts - last_sent_tg) >= 7200)
+        can_send_x = (
+            x_active
+            and (force or (now_ts - last_sent_x) >= x_cd_sec)
+            and (force or get_x_daily_post_count(x_st) < x_max_daily)
+        )
+        if not can_send_tg and not can_send_x:
             continue
 
         reasons: List[str] = []
@@ -735,34 +775,74 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
             sup_sc = getattr(fc, "nearest_support_score", 0.0)
             res_sc = getattr(fc, "nearest_resistance_score", 0.0)
 
-            radar_html = (
-                f"{header_title}\n"
-                f"💰 <b>Fiyat:</b> <code>{r['price_str']} USDT</code>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                + "\n".join([f"• {rs}" for rs in reasons[:3]])
-                + "\n"
-                + f"• <b>{sup_tier} ({sup_sc:.0f}p):</b> <code>{sup_s}</code>\n"
-                + f"• <b>{res_tier} ({res_sc:.0f}p):</b> <code>{res_s}</code>\n"
-                + f"• 🧲 <b>Mıknatıs (POC):</b> <code>{format(fc.poc_price, p_fmt)}</code>"
-            )
-            kb = build_analysis_inline_keyboard(sym, "4H")
+            chart_png_bytes: Optional[bytes] = None
             if r.get("df") is not None:
-                _send_or_update_analysis_with_chart(
-                    bot_token,
-                    chat_id,
-                    r["df"],
-                    fc,
-                    sym,
-                    "4H",
-                    radar_html,
-                    kb,
-                    include_futures_levels=False,
+                chart_png_bytes = generate_telegram_chart_png(
+                    r["df"], fc, sym, "4H", include_futures_levels=False
                 )
-            else:
-                send_telegram_message(bot_token, chat_id, radar_html, reply_markup=kb)
 
-            cooldowns[sym] = now_ts
-            alerts_sent += 1
+            x_post_url_note = ""
+            if can_send_x and (x_posts_sent < 2 or force):
+                x_tweets = format_radar_alert_x_post(
+                    symbol=sym,
+                    timeframe="4H",
+                    current_price=r["price"],
+                    fc=fc,
+                    reasons=reasons,
+                    header_title=header_title,
+                )
+                ok_x, msg_x, tid_x = publish_x_content(
+                    tweets=x_tweets,
+                    photo_bytes=chart_png_bytes,
+                    title=f"Radar Uyarısı ({sym} 4H)",
+                    symbol=sym,
+                    cfg=x_cfg,
+                )
+                if ok_x and tid_x:
+                    x_st = load_x_state()
+                    x_cooldowns = x_st.get("x_cooldowns", {})
+                    x_cooldowns[sym] = now_ts
+                    x_st["x_cooldowns"] = x_cooldowns
+                    save_x_state(x_st)
+                    x_posts_sent += 1
+                    alerts_sent += 1
+                    x_url = f"https://x.com/i/web/status/{tid_x}"
+                    x_post_url_note = f"\n• 🐦 <b>X'te Otomatik Paylaşıldı:</b> {x_url}"
+                    _log(f"🐦 X Radar Paylaşıldı: {sym} -> {x_url}")
+                else:
+                    _log(f"⚠️ X Radar Paylaşım Uyarısı ({sym}): {msg_x}")
+
+            if can_send_tg:
+                radar_html = (
+                    f"{header_title}\n"
+                    f"💰 <b>Fiyat:</b> <code>{r['price_str']} USDT</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    + "\n".join([f"• {rs}" for rs in reasons[:3]])
+                    + "\n"
+                    + f"• <b>{sup_tier} ({sup_sc:.0f}p):</b> <code>{sup_s}</code>\n"
+                    + f"• <b>{res_tier} ({res_sc:.0f}p):</b> <code>{res_s}</code>\n"
+                    + f"• 🧲 <b>Mıknatıs (POC):</b> <code>{format(fc.poc_price, p_fmt)}</code>"
+                    + x_post_url_note
+                )
+                kb = build_analysis_inline_keyboard(sym, "4H")
+                if r.get("df") is not None:
+                    _send_or_update_analysis_with_chart(
+                        bot_token,
+                        chat_id,
+                        r["df"],
+                        fc,
+                        sym,
+                        "4H",
+                        radar_html,
+                        kb,
+                        include_futures_levels=False,
+                    )
+                else:
+                    send_telegram_message(bot_token, chat_id, radar_html, reply_markup=kb)
+
+                cooldowns[sym] = now_ts
+                alerts_sent += 1
+
             if alerts_sent >= 3 and not force:
                 break
 
@@ -772,10 +852,15 @@ def _run_proactive_radar_cycle(bot_token: str, chat_id: str, force: bool = False
 
 
 def _check_auto_session_bulletin(bot_token: str, chat_id: str) -> None:
-    """Sends automatic market & cash flow summary at 09:00 and 16:30 local time if enabled."""
+    """Sends automatic market & cash flow summary at 09:00 and 16:30 local time to Telegram and X if enabled."""
     state = load_telegram_state()
-    if not state.get("auto_session_summary", True) or not chat_id:
+    x_st = load_x_state()
+    x_cfg = load_x_config()
+    tg_sess_ok = bool(state.get("auto_session_summary", True) and bot_token and chat_id)
+    x_sess_ok = bool(x_st.get("x_auto_session_bulletin", True) and is_x_configured(x_cfg))
+    if not tg_sess_ok and not x_sess_ok:
         return
+
     lt = time.localtime()
     hm = f"{lt.tm_hour:02d}:{lt.tm_min:02d}"
     day_key = f"{lt.tm_year}-{lt.tm_yday}"
@@ -786,15 +871,43 @@ def _check_auto_session_bulletin(bot_token: str, chat_id: str) -> None:
     elif hm in ("16:30", "16:31"):
         session_tag = f"{day_key}_NY_OPEN"
 
-    if session_tag and state.get("last_session_tag") != session_tag:
+    if not session_tag:
+        return
+
+    need_tg = tg_sess_ok and (state.get("last_session_tag") != session_tag)
+    need_x = x_sess_ok and (x_st.get("x_last_session_tag") != session_tag)
+    if not need_tg and not need_x:
+        return
+
+    _, _, results = _scan_watchlist_parallel("4h", only_high_quality=False)
+    if not results:
+        return
+
+    sess_tr = results[0]["fc"].session_status_tr
+    if need_x:
+        x_st["x_last_session_tag"] = session_tag
+        save_x_state(x_st)
+        x_tweets = format_market_overview_x_post(results, sess_tr, "4H")
+        top_chart = None
+        if results[0].get("df") is not None:
+            top_chart = generate_telegram_chart_png(
+                results[0]["df"], results[0]["fc"], results[0]["symbol"], "4H", include_futures_levels=False
+            )
+        ok_x, msg_x, _ = publish_x_content(
+            tweets=x_tweets,
+            photo_bytes=top_chart,
+            title="Seans Piyasa & Nakit Özeti (4H)",
+            symbol="PİYASA",
+            cfg=x_cfg,
+        )
+        _log(f"🌅 X Seans Özeti: {msg_x}")
+
+    if need_tg:
         state["last_session_tag"] = session_tag
         save_telegram_state(state)
-        _, _, results = _scan_watchlist_parallel("4h", only_high_quality=False)
-        if results:
-            sess_tr = results[0]["fc"].session_status_tr
-            html_mkt = format_market_overview_telegram_html(results, sess_tr, "4H")
-            kb = build_screener_inline_keyboard(results, "4H", False)
-            send_telegram_message(bot_token, chat_id, html_mkt, reply_markup=kb)
+        html_mkt = format_market_overview_telegram_html(results, sess_tr, "4H")
+        kb = build_screener_inline_keyboard(results, "4H", False)
+        send_telegram_message(bot_token, chat_id, html_mkt, reply_markup=kb)
 
 
 # ===========================================================================
@@ -1224,6 +1337,88 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
         else:
             send_telegram_message(bot_token, chat_id, html_wm, reply_markup=kb_wm)
 
+    # 17. 1-Tap X (Twitter) Share from Telegram Inline Buttons:
+    #     x_post:SYMBOL:TF | x_fut:SYMBOL:TF | x_scan:TF:ONLY_HQ | x_brk_scan:TF | x_fut_scan:TF | x_radar:toggle
+    elif action == "x_radar" and len(parts) >= 2:
+        sub = parts[1]
+        x_st = load_x_state()
+        if sub == "toggle":
+            x_st["x_auto_radar_enabled"] = not bool(x_st.get("x_auto_radar_enabled", True))
+            save_x_state(x_st)
+            st_msg = "🐦 X Otomatik Radar AÇILDI!" if x_st["x_auto_radar_enabled"] else "⚪ X Otomatik Radar KAPATILDI."
+            answer_callback_query(bot_token, cq_id, st_msg)
+        state = load_telegram_state()
+        html_al = _build_alarm_radar_status_html(state)
+        kb_al = build_alarm_radar_inline_keyboard(state)
+        if not edit_telegram_message(bot_token, chat_id, msg_id, html_al, reply_markup=kb_al):
+            send_telegram_message(bot_token, chat_id, html_al, reply_markup=kb_al)
+
+    elif action in ("x_post", "x_fut") and len(parts) >= 2:
+        sym = _normalize_symbol(parts[1])
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        is_fut = action == "x_fut"
+        answer_callback_query(
+            bot_token,
+            cq_id,
+            f"🐦 {sym} ({tf}) {'Vadeli Planı ' if is_fut else 'Analizi '}ve Grafiği X'te paylaşılıyor...",
+        )
+        df_act, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
+        png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf, include_futures_levels=is_fut)
+        if is_fut:
+            tweets = format_futures_setup_x_post(fc_act, sym, tf, curr_p)
+            title_s = f"{sym} ({tf}) Vadeli Planı"
+        else:
+            tweets = format_coin_analysis_x_post(fc_act, sym, tf, curr_p, mtf_scores=mtf_sc)
+            title_s = f"{sym} ({tf}) Teknik Analiz"
+        ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=png_b, title=title_s, symbol=sym)
+        if ok_x:
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>X (Twitter) Paylaşım Durumu:</b>\n{msg_x}")
+        else:
+            intent_u = build_x_intent_url(tweets[0])
+            kb_x_free = {"inline_keyboard": [[{"text": "🐦 Tek Dokunuşla X Uygulamasında Aç & Paylaş (Ücretsiz)", "url": intent_u}]]}
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐦 <b>Ücretsiz X (Twitter) Hazır Gönderi Paketi:</b>\n<i>(X Resmi API Kredisi $0 olduğu için aşağıdaki butona dokunarak X uygulamanızda hazır metinle ücretsiz paylaşabilirsiniz):</i>\n\n<pre>{tweets[0]}</pre>",
+                reply_markup=kb_x_free,
+            )
+
+    elif action in ("x_scan", "x_brk_scan", "x_fut_scan"):
+        tf = parts[1] if len(parts) >= 2 else "4H"
+        only_hq = (parts[2] == "1") if (action == "x_scan" and len(parts) >= 3) else False
+        answer_callback_query(bot_token, cq_id, f"🐦 [{tf}] Rapor X hesabınızda paylaşılıyor...")
+        _, _, results = _scan_watchlist_parallel(tf, only_high_quality=only_hq)
+        if action == "x_brk_scan":
+            tweets = format_breakout_radar_x_post(results, tf)
+            title_s = f"Kırılım Radarı ({tf})"
+        elif action == "x_fut_scan":
+            tweets = format_futures_radar_x_post(results, tf)
+            title_s = f"Vadeli İşlem Radarı ({tf})"
+        else:
+            tweets = format_screener_x_post(results, tf, only_high_quality=only_hq)
+            title_s = f"Çoklu Coin Tarama ({tf})"
+        top_png = None
+        if results and results[0].get("df") is not None:
+            top_png = generate_telegram_chart_png(
+                results[0]["df"],
+                results[0]["fc"],
+                results[0]["symbol"],
+                tf,
+                include_futures_levels=(action == "x_fut_scan"),
+            )
+        ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=top_png, title=title_s, symbol="TARAMA")
+        if ok_x:
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>X (Twitter) Paylaşım Durumu:</b>\n{msg_x}")
+        else:
+            intent_u = build_x_intent_url(tweets[0])
+            kb_x_free = {"inline_keyboard": [[{"text": "🐦 Tek Dokunuşla X Uygulamasında Aç & Paylaş (Ücretsiz)", "url": intent_u}]]}
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐦 <b>Ücretsiz X (Twitter) Hazır Rapor Paketi:</b>\n\n<pre>{tweets[0]}</pre>",
+                reply_markup=kb_x_free,
+            )
+
     else:
         answer_callback_query(bot_token, cq_id, "✅ İşlem alındı.")
 
@@ -1574,6 +1769,55 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                     reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
                 )
 
+        elif cmd in ("/x", "/tweet", "/xpaylas"):
+            sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"
+            tf = parts[2].lower() if len(parts) >= 3 else "4h"
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>{sym} [{tf.upper()}]</b> analizi ve grafiği X (Twitter) hesabınızda paylaşılıyor...")
+            df_act, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
+            png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf, include_futures_levels=False)
+            tweets = format_coin_analysis_x_post(fc_act, sym, tf, curr_p, mtf_scores=mtf_sc)
+            ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=png_b, title=f"{sym} ({tf.upper()}) Analiz", symbol=sym)
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐦 <b>X Paylaşım Sonucu:</b>\n{msg_x}",
+                reply_markup=build_analysis_inline_keyboard(sym, tf.upper()),
+            )
+
+        elif cmd in ("/xvadeli", "/xfutures"):
+            sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"
+            tf = parts[2].lower() if len(parts) >= 3 else "4h"
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>{sym} [{tf.upper()}]</b> Vadeli İşlem Planı ve grafiği X'te paylaşılıyor...")
+            df_act, fc_act, _, _, curr_p = _compute_full_coin_bundle(sym, tf)
+            png_b = generate_telegram_chart_png(df_act, fc_act, sym, tf, include_futures_levels=True)
+            tweets = format_futures_setup_x_post(fc_act, sym, tf, curr_p)
+            ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=png_b, title=f"{sym} ({tf.upper()}) Vadeli Plan", symbol=sym)
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐦 <b>X Vadeli Paylaşım Sonucu:</b>\n{msg_x}",
+                reply_markup=build_futures_setup_inline_keyboard(sym, tf.upper()),
+            )
+
+        elif cmd in ("/xtara", "/xkirilim", "/xpiyasa"):
+            tf = parts[1].lower() if len(parts) >= 2 else "4h"
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>[{tf.upper()}]</b> Rapor hazırlanıp X hesabınızda paylaşılıyor...")
+            _, _, results = _scan_watchlist_parallel(tf, only_high_quality=False)
+            if cmd == "/xkirilim":
+                tweets = format_breakout_radar_x_post(results, tf)
+                title_s = f"Kırılım Radarı ({tf.upper()})"
+            elif cmd == "/xpiyasa" and results:
+                tweets = format_market_overview_x_post(results, results[0]["fc"].session_status_tr, tf)
+                title_s = f"Piyasa Özeti ({tf.upper()})"
+            else:
+                tweets = format_screener_x_post(results, tf, False)
+                title_s = f"Tarama Özeti ({tf.upper()})"
+            top_png = None
+            if results and results[0].get("df") is not None:
+                top_png = generate_telegram_chart_png(results[0]["df"], results[0]["fc"], results[0]["symbol"], tf, include_futures_levels=False)
+            ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=top_png, title=title_s, symbol="RAPOR")
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>X Paylaşım Sonucu:</b>\n{msg_x}")
+
         elif not cmd.startswith("/") and 2 <= len(parts[0]) <= 12:
             sym = _normalize_symbol(parts[0])
             tf = parts[1].lower() if len(parts) >= 2 else "4h"
@@ -1655,19 +1899,28 @@ def run_polling_bot(bot_token: str) -> None:
                 bot_token = latest_tok
             auth_chat_id = saved_cfg.get("chat_id", "").strip()
 
-            # 1. Background Price Alarm Check (every 30s) — dispatched to worker pool so getUpdates never blocks
+            # 1. Background Price Alarm & Session Bulletin Check (every 30s)
             if (now_t - last_alarm_check) >= 30.0:
                 last_alarm_check = now_t
-                worker_pool.submit(_check_price_alarms, bot_token, auth_chat_id)
-                if auth_chat_id:
+                if bot_token:
+                    worker_pool.submit(_check_price_alarms, bot_token, auth_chat_id)
+                if auth_chat_id or is_x_configured():
                     worker_pool.submit(_check_auto_session_bulletin, bot_token, auth_chat_id)
 
-            # 2. Background 24/7 Smart Breakout/Whale/Squeeze Radar (every 10 min) — dispatched to worker pool
+            # 2. Background 24/7 Smart Breakout/Whale/Squeeze Radar (Telegram + X Auto-Publisher)
             state_curr = load_telegram_state()
+            x_state_curr = load_x_state()
             radar_int = float(state_curr.get("radar_interval_sec", 600))
-            if auth_chat_id and state_curr.get("radar_enabled", True) and (now_t - last_radar_check) >= radar_int:
+            tg_radar_ready = bool(bot_token and auth_chat_id and state_curr.get("radar_enabled", True))
+            x_radar_ready = bool(is_x_configured() and x_state_curr.get("x_auto_radar_enabled", True))
+            if (tg_radar_ready or x_radar_ready) and (now_t - last_radar_check) >= radar_int:
                 last_radar_check = now_t
                 worker_pool.submit(_run_proactive_radar_cycle, bot_token, auth_chat_id, False)
+
+            if not bot_token:
+                # X-only mode (no Telegram Bot Token configured): sleep 10s between background radar checks
+                time.sleep(10)
+                continue
 
             # 3. Poll Telegram Updates (messages + callback_query touch buttons) — Open to ALL users
             url = (
@@ -1717,9 +1970,8 @@ def run_polling_bot(bot_token: str) -> None:
 if __name__ == "__main__":
     cfg = load_telegram_config()
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or cfg.get("bot_token", "")
-    if not token:
-        print("❗ Telegram Bot Token bulunamadı.")
-        print("Lütfen Streamlit arayüzünün sol menüsündeki '📲 Mobil & Telegram Bildirim Merkezi' bölümünden Bot Token kaydedin")
-        print("veya TELEGRAM_BOT_TOKEN ortam değişkenini tanımlayın.")
+    if not token and not is_x_configured():
+        print("❗ Telegram Bot Token veya X (Twitter) API Anahtarı bulunamadı.")
+        print("Lütfen Streamlit arayüzünün sol menüsünden Telegram Bot Token veya X API Anahtarlarınızı kaydedin.")
         sys.exit(1)
     run_polling_bot(token)

@@ -206,7 +206,8 @@ class SmartMoneyEngine:
         bull_obs: List[OrderBlockZone] = []
         bear_obs: List[OrderBlockZone] = []
 
-        end_idx = len(sub) - 3
+        last_valid = len(sub) - 2 if ("is_closed" in sub.columns and not bool(sub["is_closed"].iloc[-1])) else len(sub) - 1
+        end_idx = max(1, last_valid - 2)
         for i in range(1, end_idx):
             atr_val = atrs[i]
             # Bullish Order Block candidate: candle i is bearish, followed by strong upward displacement
@@ -215,8 +216,8 @@ class SmartMoneyEngine:
                 if displacement_up >= 1.35 * atr_val and max(closes[i + 1], closes[i + 2]) > highs[i]:
                     ob_top = float(opens[i])
                     ob_bot = float(lows[i])
-                    # Unmitigated if price hasn't closed below ob_bot since i+2
-                    subsequent_closes = closes[i + 2 :]
+                    # Unmitigated if closed price hasn't closed below ob_bot since i+2
+                    subsequent_closes = closes[i + 2 : last_valid + 1]
                     if np.min(subsequent_closes) > ob_bot and current_price > ob_bot:
                         bull_obs.append(
                             OrderBlockZone(
@@ -235,7 +236,7 @@ class SmartMoneyEngine:
                 if displacement_down >= 1.35 * atr_val and min(closes[i + 1], closes[i + 2]) < lows[i]:
                     ob_top = float(highs[i])
                     ob_bot = float(opens[i])
-                    subsequent_closes = closes[i + 2 :]
+                    subsequent_closes = closes[i + 2 : last_valid + 1]
                     if np.max(subsequent_closes) < ob_top and current_price < ob_top:
                         bear_obs.append(
                             OrderBlockZone(
@@ -585,19 +586,37 @@ class SmartMoneyEngine:
         lookback: int = 30,
     ) -> RelativeStrengthMetrics:
         """
-        Compute Relative Strength (RS), Beta, and Correlation of an altcoin against BTC/USDT.
+        Compute Relative Strength (RS), Beta, and Correlation of an altcoin against BTC/USDT,
+        strictly aligned by exact `timestamp` on closed candles (Zero Misaligned Bar Bias).
         """
         if symbol.startswith("BTC/") or btc_df is None or len(coin_df) < lookback or len(btc_df) < lookback:
             return RelativeStrengthMetrics(status_tr="Piyasa Referans Varlığı (BTC)")
 
-        c_sub = coin_df.tail(lookback)["close"].values
-        b_sub = btc_df.tail(lookback)["close"].values
-        m = min(len(c_sub), len(b_sub))
-        if m < 10:
-            return RelativeStrengthMetrics()
+        c_closed = coin_df[coin_df["is_closed"].astype(bool)] if "is_closed" in coin_df.columns else coin_df
+        b_closed = btc_df[btc_df["is_closed"].astype(bool)] if "is_closed" in btc_df.columns else btc_df
 
-        c_sub = c_sub[-m:]
-        b_sub = b_sub[-m:]
+        c_sub: Optional[np.ndarray] = None
+        b_sub: Optional[np.ndarray] = None
+        if "timestamp" in c_closed.columns and "timestamp" in b_closed.columns:
+            merged = pd.merge(
+                c_closed[["timestamp", "close"]].rename(columns={"close": "c_close"}),
+                b_closed[["timestamp", "close"]].rename(columns={"close": "b_close"}),
+                on="timestamp",
+                how="inner",
+            ).sort_values("timestamp")
+            if len(merged) >= 12:
+                tail_m = merged.tail(lookback)
+                c_sub = tail_m["c_close"].to_numpy(dtype=float)
+                b_sub = tail_m["b_close"].to_numpy(dtype=float)
+
+        if c_sub is None or b_sub is None:
+            c_arr = c_closed.tail(lookback)["close"].values
+            b_arr = b_closed.tail(lookback)["close"].values
+            m = min(len(c_arr), len(b_arr))
+            if m < 10:
+                return RelativeStrengthMetrics()
+            c_sub = c_arr[-m:]
+            b_sub = b_arr[-m:]
 
         coin_ret_pct = ((c_sub[-1] - c_sub[0]) / max(c_sub[0], 1e-9)) * 100.0
         btc_ret_pct = ((b_sub[-1] - b_sub[0]) / max(b_sub[0], 1e-9)) * 100.0

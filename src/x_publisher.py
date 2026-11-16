@@ -1032,3 +1032,50 @@ def format_market_overview_x_post(
         lines.append(f"🐋 Balina Lideri: {c_wh} ({top_wh['whale']:.0f}/100)")
     lines.append("⚖️ YTD #Bitcoin #Kripto #Altcoin")
     return [fit_x_text_280("\n".join(lines), 278)]
+
+
+def format_ledger_scorecard_x_post(sc: Any) -> List[str]:
+    """Formats the SQLite Live Signal Scorecard into a <=280-char transparent X post."""
+    lines = [
+        "📊 Canlı Sinyal Karnesi & Şeffaf Performans (30G)",
+        f"📌 Takip: {sc.total_tracked} Kurulum (Açık: {sc.open_count} | Biten: {sc.closed_count})",
+    ]
+    if sc.closed_count > 0:
+        lines.extend(
+            [
+                f"🎯 Gerçek Başarı: %{sc.win_rate_pct:.1f} ({sc.wins_count}K / {sc.losses_count}Z)",
+                f"💰 Net Getiri: {sc.cumulative_net_r:+.2f}R | PF: {sc.profit_factor:.2f}",
+                f"📉 Maks DD: -{sc.max_drawdown_r:.2f}R (%0.10 Komisyon Dahil)",
+            ]
+        )
+    else:
+        lines.append("⏳ Açık kurulumlar sonuçlandığında komisyon düşülerek işlenir.")
+    lines.append("⚖️ YTD #Kripto #Bitcoin")
+    return [fit_x_text_280("\n".join(lines), 278)]
+
+
+def format_market_hunter_x_post(report: Any, mode: Optional[str] = None) -> List[str]:
+    """Formats the Top-80 Market-Wide Real Spot Cash-Flow & Squeeze Hunter Report for X."""
+    from .market_scanner import fmt_usd_compact
+
+    tf_up = str(getattr(report, "timeframe", "1H")).upper()
+    n_uni = int(getattr(report, "universe_scanned", 80))
+    net_4b = float(getattr(report, "total_top_spot_net_4bar_usd", 0.0))
+    pos_n = int(getattr(report, "inflow_positive_count", 0))
+    picks = list(getattr(report, "top_picks", []) or [])
+
+    lines = [
+        f"🌐 Top {n_uni} Piyasa Spot Nakit & Sıkışma Avcısı [{tf_up}]",
+        f"💵 Top {n_uni} Net Spot: {fmt_usd_compact(net_4b)} | Giriş: {pos_n}/{n_uni} Coin",
+    ]
+    if not picks:
+        lines.append("🛑 Şu an köpüksüz güçlü Spot birikim kriterini geçen aday yok; savunma modu aktif.")
+    else:
+        for c in picks[:3]:
+            cashtag, _ = _coin_cashtag(c.symbol)
+            best_z = max(float(c.delta_zscore), float(c.flow_impulse_z))
+            lines.append(
+                f"• {cashtag} ({c.hunter_score:.0f}p): Spot {fmt_usd_compact(c.spot_delta_4bar_usd)} ({best_z:+.1f}σ) | Sıkışma %{c.squeeze_energy_pct:.0f}"
+            )
+    lines.append("⚖️ YTD #Bitcoin #Kripto #Altcoin")
+    return [fit_x_text_280("\n".join(lines), 278)]

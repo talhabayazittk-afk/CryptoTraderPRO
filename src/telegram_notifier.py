@@ -347,12 +347,16 @@ def build_main_reply_keyboard() -> Dict[str, Any]:
         "keyboard": [
             [
                 {"text": "🪙 Coin Seç & Analiz"},
-                {"text": "🚨 Kırılım Radarı"},
+                {"text": "🐋 Piyasa Avcısı (Top 80)"},
                 {"text": "⚡ Vadeli İşlem Radarı"},
             ],
             [
+                {"text": "🚨 Kırılım Radarı"},
                 {"text": "🚀 Tümünü Tara (4H)"},
                 {"text": "🌍 Piyasa & Nakit Özeti"},
+            ],
+            [
+                {"text": "📊 Canlı Sinyal Karnesi"},
                 {"text": "⏰ Alarmlarım & Radar"},
             ],
         ],

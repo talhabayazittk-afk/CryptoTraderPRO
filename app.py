@@ -21,9 +21,12 @@ import src
 import src.config
 import src.data_fetcher
 import src.indicators
+import src.market_scanner
 import src.patterns
 import src.smart_money
 import src.signals
+import src.signal_ledger
+import src.pipeline
 import src.visualizer
 import src.telegram_notifier
 import src.x_publisher
@@ -41,15 +44,24 @@ if (
     or not hasattr(src.signals, "FuturesSetupReport")
     or not hasattr(src.signals.MarketForecast, "sr_breakout_guide_tr")
     or not hasattr(src.signals.MarketForecast, "plain_guidance_tr")
+    or not hasattr(src.signals.MarketForecast, "contradiction_veto_tr")
     or not hasattr(src.x_publisher, "publish_x_content")
+    or not hasattr(src.x_publisher, "format_ledger_scorecard_x_post")
+    or not hasattr(src.x_publisher, "format_market_hunter_x_post")
+    or not hasattr(src.pipeline, "AnalysisPipeline")
+    or not hasattr(src.signal_ledger, "SignalLedger")
+    or not hasattr(src.market_scanner, "MarketWideHunter")
 ):
     for _mod in (
         src.config,
         src.data_fetcher,
         src.indicators,
+        src.market_scanner,
         src.patterns,
         src.smart_money,
         src.signals,
+        src.signal_ledger,
+        src.pipeline,
         src.visualizer,
         src.telegram_notifier,
         src.x_publisher,
@@ -64,7 +76,15 @@ if (
 from src.config import AnalysisConfig, ChartConfig, ExchangeConfig, IndicatorConfig, PatternConfig
 from src.data_fetcher import CryptoDataFetcher, OrderFlowIntel
 from src.indicators import TechnicalIndicators
+from src.market_scanner import (
+    MarketWideHunter,
+    build_market_hunter_inline_keyboard,
+    fmt_usd_compact,
+    format_market_hunter_telegram_html,
+)
 from src.patterns import CandlestickPatternDetector, PATTERN_INFO_TR
+from src.pipeline import AnalysisPipeline
+from src.signal_ledger import SignalLedger, format_ledger_telegram_html
 from src.signals import MarketForecast, SignalEngine
 from src.telegram_notifier import (
     build_analysis_inline_keyboard,
@@ -95,6 +115,8 @@ from src.x_publisher import (
     format_coin_analysis_x_post,
     format_futures_radar_x_post,
     format_futures_setup_x_post,
+    format_ledger_scorecard_x_post,
+    format_market_hunter_x_post,
     format_market_overview_x_post,
     format_screener_x_post,
     get_x_daily_post_count,
@@ -377,76 +399,26 @@ def load_coin_intelligence(
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     sample_capital_usd: float = 1000.0,
     risk_pct: float = 1.0,
-    _engine_version: str = "v12.0_phase2",
+    _engine_version: str = "v13.0_phase3",
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, MarketForecast], OrderFlowIntel, str, Dict[str, float]]:
     """
-    Parallel cached pipeline (v3.0):
-    Fetches multi-timeframe OHLCV (with Real Taker Buy/Sell CVD) + Deep Spot OrderBook
-    + Futures Funding/OI/Long-Short/Taker/Basis, and computes HTF + BTC Macro + SMC + Probability Cone
-    + Position Sizing and path-dependent backtest win-rates.
+    Canonical Phase 3 Single-Source-of-Truth Pipeline:
+    Delegates directly to `AnalysisPipeline.run_coin_bundle` so Web UI, Telegram Bot, and X
+    produce 100% identical indicators, cash-flow metrics, contradiction locks, and SQLite Ledger logs.
     """
-    base_cfg = AnalysisConfig(
-        exchange=ExchangeConfig(primary_exchange=exchange_id, symbol=symbol, limit=limit),
-        indicators=IndicatorConfig(),
-        patterns=PatternConfig(),
-        chart=ChartConfig(),
-    )
-    fetcher = CryptoDataFetcher(base_cfg.exchange)
-    indicators = TechnicalIndicators(base_cfg.indicators)
-    detector = CandlestickPatternDetector(base_cfg.patterns)
-    signal_engine = SignalEngine(base_cfg.indicators)
-
-    raw_tf_dict, source_used = fetcher.fetch_multi_timeframe_parallel(
+    bundle = AnalysisPipeline.run_coin_bundle(
         symbol=symbol,
+        exchange_id=exchange_id,
         timeframes=list(timeframes),
         limit=limit,
-        exchange_id=exchange_id,
+        btc_regime_scores=btc_regime_scores,
+        btc_tf_data=btc_tf_data,
+        sample_capital_usd=sample_capital_usd,
+        risk_pct=risk_pct,
         allow_synthetic_fallback=False,
+        enable_ledger=True,
     )
-    order_flow = fetcher.fetch_order_flow_intel(symbol=symbol, exchange_id=exchange_id)
-
-    tf_data: Dict[str, pd.DataFrame] = {}
-    tf_forecasts: Dict[str, MarketForecast] = {}
-    coin_scores: Dict[str, float] = {}
-
-    ordered_tfs = [tf.upper() for tf in timeframes]
-    for tf_key in ordered_tfs:
-        df_ind = indicators.enrich(raw_tf_dict[tf_key])
-        df_pat = detector.detect_all(df_ind)
-        tf_data[tf_key] = signal_engine.evaluate(df_pat)
-
-    # Evaluate from highest timeframe (1D -> 4H -> 1H -> 15M) so HTF feeds into LTF
-    htf_prev_score: Optional[float] = None
-    htf_sr_pool: List[Any] = []
-    for tf_key in reversed(ordered_tfs):
-        df_final = tf_data[tf_key]
-        btc_score = (
-            btc_regime_scores.get(tf_key)
-            if (btc_regime_scores and not symbol.startswith("BTC/"))
-            else None
-        )
-        btc_df = btc_tf_data.get(tf_key) if btc_tf_data else None
-        gf_kwargs: Dict[str, Any] = {
-            "order_flow": order_flow,
-            "htf_score": htf_prev_score,
-            "btc_regime_score": btc_score,
-            "symbol": symbol,
-            "btc_df": btc_df,
-            "sample_capital_usd": sample_capital_usd,
-            "risk_pct": risk_pct,
-        }
-        if "htf_sr_levels" in inspect.signature(signal_engine.generate_forecast).parameters:
-            gf_kwargs["htf_sr_levels"] = list(htf_sr_pool) if htf_sr_pool else None
-        forecast = signal_engine.generate_forecast(df_final, **gf_kwargs)
-        tf_forecasts[tf_key] = forecast
-        coin_scores[tf_key] = forecast.score
-        htf_prev_score = forecast.score
-        if tf_key in ("1D", "4H"):
-            htf_sr_pool.extend(forecast.support_levels[:2])
-            htf_sr_pool.extend(forecast.resistance_levels[:2])
-
-    tf_forecasts = {k: tf_forecasts[k] for k in ordered_tfs}
-    return tf_data, tf_forecasts, order_flow, source_used, coin_scores
+    return bundle.tf_data, bundle.tf_forecasts, bundle.order_flow, bundle.source_used, bundle.mtf_scores
 
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1043,258 @@ with st.expander("🌐 Çoklu Coin Tarama Tablosu & ⚡ Vadeli İşlem Radarı �
                     st.warning(msg_xf)
 
 # ---------------------------------------------------------------------------
+# MARKET-WIDE TOP 80 REAL SPOT CASH-FLOW & SQUEEZE HUNTER
+# ---------------------------------------------------------------------------
+with st.expander("🌐 Tüm Piyasayı Tarayan 'Balina Girişi & Sıkışma Avcısı' (Top 80 Likit Coin — %100 Gerçek Spot Taker Verisi)", expanded=False):
+    st.caption(
+        "İzleme listenizde olmasa bile borsadaki en likit **USDT** paritelerinin kapanmış 12-sütunlu **Spot + USD-M Vadeli** mumlarını tarar; "
+        "**gerçek agresif Spot nakit girişi (`Taker Buy - Sell $`)**, **Z-Skor anomalisi**, **volatilite sıkışması (Squeeze)** ve **kaldıraç köpüğü filtresini** geçen fırsatları yakalar."
+    )
+    hc1, hc2, hc3, hc4 = st.columns([1.1, 1.1, 1.3, 1.8])
+    with hc1:
+        hunter_tf = st.selectbox("Periyot", options=["1H", "4H"], index=0, key="hunter_tf_sel")
+    with hc2:
+        hunter_uni = st.selectbox("Taranacak Evren", options=[60, 80, 100], index=1, format_func=lambda x: f"Top {x} Likit Coin", key="hunter_uni_sel")
+    with hc3:
+        hunter_min_vol_m = st.selectbox("Min. 24S Hacim", options=[2.5, 5.0, 10.0, 25.0], index=0, format_func=lambda x: f">= ${x:g}M (24S)", key="hunter_vol_sel")
+    with hc4:
+        hunter_view_mode = st.selectbox(
+            "Görünüm Filtresi",
+            options=["Doğrulanmış En Güçlü Adaylar", "Sadece Liste Dışı Yeni Keşifler (🆕)", "Taranan Tüm Piyasa Tablosu"],
+            index=0,
+            key="hunter_view_sel",
+        )
+
+    h_act1, h_act2 = st.columns([2, 3])
+    with h_act1:
+        run_hunter_btn = st.button(f"🔎 Top {hunter_uni} Piyasayı Şimdi Canlı Tara (~4 sn)", type="primary", use_container_width=True)
+    with h_act2:
+        st.caption("💡 Stabilcoinler, kaldıraçlı tokenlar ve sığ tahtalar otomatik elenir; yalnızca kapanmış mum verisi kullanılır.")
+
+    if run_hunter_btn:
+        with st.spinner(f"Borsadaki en likit {hunter_uni} USDT tahtasının gerçek Spot + Vadeli Taker para akışları taranıyor..."):
+            try:
+                st.session_state["market_hunter_report"] = MarketWideHunter.scan_market(
+                    timeframe=hunter_tf.lower(),
+                    universe_size=int(hunter_uni),
+                    min_quote_vol_usd=float(hunter_min_vol_m) * 1_000_000.0,
+                    top_n=15,
+                    watchlist=st.session_state.watchlist,
+                    force_refresh=True,
+                )
+            except Exception as h_err:
+                st.error(f"Piyasa Avcısı taraması sırasında bağlantı hatası oluştu: {h_err}")
+
+    hunter_rep = st.session_state.get("market_hunter_report")
+    if hunter_rep is not None:
+        # Refresh watchlist membership dynamically
+        wl_curr_set = {s.upper() for s in st.session_state.watchlist}
+        for c_item in hunter_rep.all_ranked:
+            c_item.in_watchlist = c_item.symbol.upper() in wl_curr_set
+
+        tf_win_lbl = "Son 4 Saat" if hunter_rep.timeframe == "1H" else "Son 16 Saat"
+        hk1, hk2, hk3, hk4 = st.columns(4)
+        breadth_p = (hunter_rep.inflow_positive_count / max(1, hunter_rep.universe_scanned)) * 100.0
+        hk1.metric(
+            f"Top {hunter_rep.universe_scanned} Net Spot ({tf_win_lbl})",
+            fmt_usd_compact(hunter_rep.total_top_spot_net_4bar_usd),
+            f"24S: {fmt_usd_compact(hunter_rep.total_top_spot_net_24h_usd)}",
+        )
+        hk2.metric(
+            "Pozitif Spot Giriş Genişliği",
+            f"{hunter_rep.inflow_positive_count} / {hunter_rep.universe_scanned} Coin",
+            f"%{breadth_p:.0f} Alıcılı Tahta",
+        )
+        hk3.metric(
+            "Volatilite Sıkışması (Squeeze)",
+            f"{hunter_rep.squeezing_count} Coin",
+            f"{hunter_rep.timeframe} Periyotta Sıkışan",
+        )
+        hk4.metric(
+            "Köpüksüz Nitelikli Aday",
+            f"{len(hunter_rep.top_picks)} Coin",
+            f"Kaynak: {hunter_rep.exchange_source}",
+        )
+
+        if hunter_view_mode == "Doğrulanmış En Güçlü Adaylar":
+            display_cands = list(hunter_rep.top_picks)
+        elif hunter_view_mode == "Sadece Liste Dışı Yeni Keşifler (🆕)":
+            display_cands = [c for c in hunter_rep.top_picks if not c.in_watchlist]
+        else:
+            display_cands = list(hunter_rep.all_ranked)
+
+        if not display_cands:
+            st.warning(
+                "🛑 Seçili filtrede (Gerçek Spot Nakit Girişi + Köpüksüz Vadeli + Sağlıklı Yapı) tüm şartları aynı anda sağlayan aday bulunamadı. "
+                "Piyasa genelini görmek için yukarıdan **'Taranan Tüm Piyasa Tablosu'** görünümünü seçebilirsiniz."
+            )
+        else:
+            hunter_df_rows = []
+            for c in display_cands:
+                best_z = max(c.delta_zscore, c.flow_impulse_z)
+                hunter_df_rows.append(
+                    {
+                        "Liste": "📌 Listede" if c.in_watchlist else "🆕 Yeni Keşif",
+                        "Coin": c.symbol,
+                        "Avcı Skoru": f"{c.hunter_score:.0f}/100",
+                        "Sinyal Sınıfı": c.signal_badge_tr,
+                        "Fiyat": price_fmt(c.price),
+                        "24S Değişim": f"{c.change_24h_pct:+.2f}%",
+                        f"Gerçek Spot ({tf_win_lbl})": fmt_usd_compact(c.spot_delta_4bar_usd),
+                        "24S Net Spot": fmt_usd_compact(c.spot_delta_24h_usd),
+                        "Nakit Z-Skor": f"{best_z:+.2f}σ",
+                        "Taker Alıcı %": f"%{c.spot_buy_ratio_4bar_pct:.1f}",
+                        "Göreli Hacim": f"{c.rvol:.2f}x",
+                        "Sıkışma": f"%{c.squeeze_energy_pct:.0f}" + (" 🔥" if c.is_squeezing else ""),
+                        "Fonlama": f"{c.funding_rate_pct:+.4f}%" if c.funding_rate_pct is not None else "Spot",
+                        "Spot vs Vadeli": c.spot_perp_quality_tr,
+                        "Kırılım Direnci": price_fmt(c.breakout_trigger_price),
+                        "Destek / İptal": price_fmt(c.support_invalid_price),
+                    }
+                )
+            st.dataframe(pd.DataFrame(hunter_df_rows), use_container_width=True, hide_index=True)
+
+            # 1-Click Add Unlisted Discoveries to Watchlist
+            unlisted_options = [c.symbol for c in display_cands if not c.in_watchlist]
+            if unlisted_options:
+                add_col1, add_col2 = st.columns([3, 1.4])
+                with add_col1:
+                    picked_to_add = st.multiselect(
+                        "🆕 Keşfedilen coinlerden izleme listenize (`watchlist.json`) eklemek istediklerinizi seçin:",
+                        options=unlisted_options,
+                        default=unlisted_options[: min(2, len(unlisted_options))],
+                        key="hunter_add_ms",
+                    )
+                with add_col2:
+                    st.markdown("<div style='height:26px;'></div>", unsafe_allow_html=True)
+                    if st.button("➕ Seçilenleri İzleme Listeme Ekle", use_container_width=True):
+                        added_now = []
+                        for s_new in picked_to_add:
+                            if s_new not in st.session_state.watchlist:
+                                st.session_state.watchlist.append(s_new)
+                                added_now.append(s_new)
+                        if added_now:
+                            save_watchlist(st.session_state.watchlist)
+                            st.session_state["_last_disk_wl"] = list(st.session_state.watchlist)
+                            st.success(f"✅ {', '.join(added_now)} izleme listenize eklendi! Sayfa yenilendiğinde grafik inceleyicide görünecektir.")
+                            st.rerun()
+
+        hsh1, hsh2 = st.columns(2)
+        with hsh1:
+            if st.button("📲 Top 80 Piyasa Avcısı Raporunu Telegram'a Gönder", use_container_width=True):
+                only_un_flag = hunter_view_mode == "Sadece Liste Dışı Yeni Keşifler (🆕)"
+                html_h_tg = format_market_hunter_telegram_html(hunter_rep, only_unlisted=only_un_flag)
+                kb_h_tg = build_market_hunter_inline_keyboard(hunter_rep, only_unlisted=only_un_flag)
+                ok_htg, msg_htg = send_telegram_message(tg_token_input, tg_chat_input, html_h_tg, reply_markup=kb_h_tg)
+                if ok_htg:
+                    st.success(msg_htg)
+                else:
+                    st.warning(msg_htg)
+        with hsh2:
+            if st.button("🐦 Top 80 Piyasa Avcısı Raporunu X'te Paylaş", use_container_width=True):
+                tweets_hx = format_market_hunter_x_post(hunter_rep)
+                png_hx = b""
+                if hunter_rep.top_picks:
+                    top_pick_sym = hunter_rep.top_picks[0].symbol
+                    if top_pick_sym in all_coin_results:
+                        t_df, t_fcs, _, _ = all_coin_results[top_pick_sym]
+                        tf_k = hunter_rep.timeframe if hunter_rep.timeframe in t_df else "4H"
+                        png_hx = generate_telegram_chart_png(t_df[tf_k], t_fcs[tf_k], top_pick_sym, tf_k, include_futures_levels=False)
+                ok_hx, msg_hx, _ = publish_x_content(
+                    tweets_hx,
+                    photo_bytes=png_hx,
+                    title=f"Top {hunter_rep.universe_scanned} Piyasa Avcısı ({hunter_rep.timeframe})",
+                    symbol="AVCI",
+                )
+                if ok_hx:
+                    st.success(msg_hx)
+                else:
+                    st.markdown(msg_hx)
+
+# ---------------------------------------------------------------------------
+# PHASE 3: LIVE SQLITE SIGNAL SCORECARD & SELF-VERIFICATION LEDGER
+# ---------------------------------------------------------------------------
+with st.expander("📊 Canlı Sinyal Karnesi & Şeffaf Öz-Doğrulama Defteri (SQLite — %0.10 Komisyon & Kayma Dahil)", expanded=False):
+    ledger_inst = SignalLedger()
+    sc_live = ledger_inst.get_scorecard(days=30, limit_recent=20)
+    st.caption(
+        "Sistem tarafından üretilen gerçek zamanlı kurulumlar (`1H`, `4H`, `1D`) SQLite (`signal_ledger.db`) defterine işlenir "
+        "ve takip eden borsa mumlarının iğnelerine göre (%0.10 toplam komisyon/kayma düşülerek) otomatik doğrulanır."
+    )
+    lc1, lc2, lc3, lc4, lc5 = st.columns(5)
+    lc1.metric("Toplam Takip (30G)", f"{sc_live.total_tracked}", f"Açık: {sc_live.open_count}")
+    lc2.metric(
+        "Gerçek Başarı Oranı",
+        f"%{sc_live.win_rate_pct:.1f}" if sc_live.closed_count > 0 else "Bekleniyor",
+        f"{sc_live.wins_count}K / {sc_live.losses_count}Z",
+    )
+    lc3.metric(
+        "Toplam Net Getiri (R)",
+        f"{sc_live.cumulative_net_r:+.2f}R" if sc_live.closed_count > 0 else "0.00R",
+        f"Ort: {sc_live.avg_r_per_trade:+.2f}R",
+    )
+    lc4.metric("Profit Factor", f"{sc_live.profit_factor:.2f}" if sc_live.closed_count > 0 else "—")
+    lc5.metric("Maks. Düşüş (DD)", f"-{sc_live.max_drawdown_r:.2f}R" if sc_live.closed_count > 0 else "0.00R")
+
+    if sc_live.recent_signals:
+        ledger_rows_ui = []
+        for s_row in sc_live.recent_signals:
+            st_raw = str(s_row.get("status", "OPEN"))
+            st_badge = (
+                "🚀 TP2 KAZANÇ"
+                if st_raw == "TP2_WIN"
+                else (
+                    "✅ TP1 + Başabaş"
+                    if st_raw == "TP1_PARTIAL_WIN"
+                    else ("🛑 STOP" if st_raw == "STOP_LOSS" else ("⏳ AÇIK TAKİPTE" if st_raw == "OPEN" else "⌛ SÜRE DOLDU"))
+                )
+            )
+            ledger_rows_ui.append(
+                {
+                    "Tarih (UTC)": s_row.get("created_at_utc", ""),
+                    "Coin": s_row.get("symbol", ""),
+                    "Periyot": s_row.get("timeframe", ""),
+                    "Yön": s_row.get("direction", ""),
+                    "Giriş": price_fmt(float(s_row.get("entry_price", 0.0))),
+                    "TP1": price_fmt(float(s_row.get("tp1_price", 0.0))),
+                    "TP2": price_fmt(float(s_row.get("tp2_price", 0.0))),
+                    "Stop": price_fmt(float(s_row.get("stop_price", 0.0))),
+                    "Güven": f"{float(s_row.get('confidence_score', 0.0)):.0f}/100",
+                    "Durum": st_badge,
+                    "Net R (Komisyon Dahil)": (
+                        f"{float(s_row.get('net_r_multiple', 0.0)):+.2f}R"
+                        if st_raw != "OPEN"
+                        else ("TP1 Alındı 🔒" if int(s_row.get("tp1_hit", 0)) == 1 else "Devam Ediyor")
+                    ),
+                }
+            )
+        st.dataframe(pd.DataFrame(ledger_rows_ui), use_container_width=True, hide_index=True)
+    else:
+        st.info("ℹ️ Henüz SQLite öz-doğrulama defterine kaydedilmiş kurulum bulunmuyor; kriterleri karşılayan ilk canlı kurulumda otomatik başlar.")
+
+    lbtn1, lbtn2 = st.columns(2)
+    with lbtn1:
+        if st.button("📲 Canlı Sinyal Karnesini Telegram'a Gönder", use_container_width=True):
+            ok_lg, msg_lg = send_telegram_message(
+                tg_token_input,
+                tg_chat_input,
+                format_ledger_telegram_html(sc_live),
+                reply_markup=build_main_reply_keyboard(),
+            )
+            if ok_lg:
+                st.success(msg_lg)
+            else:
+                st.warning(msg_lg)
+    with lbtn2:
+        if st.button("🐦 Şeffaf Performans Karnesini X'te Paylaş", use_container_width=True):
+            tweets_lg = format_ledger_scorecard_x_post(sc_live)
+            ok_xlg, msg_xlg, _ = publish_x_content(tweets_lg, photo_bytes=b"", title="Canlı Sinyal Karnesi", symbol="KARNE")
+            if ok_xlg:
+                st.success(msg_xlg)
+            else:
+                st.markdown(msg_xlg)
+
+# ---------------------------------------------------------------------------
 # DETAILED SINGLE-COIN INSPECTOR (CLEAN, CONCISE & JARGON-FREE LAYOUT)
 # ---------------------------------------------------------------------------
 available_symbols = [s for s in st.session_state.watchlist if s in all_coin_results]
@@ -1235,6 +1459,9 @@ st.caption(
     f"**Spot:** `{spot_src_lbl}` &nbsp;|&nbsp; **Küresel Vadeli:** `{fut_src_lbl}`"
     + (f" &nbsp;|&nbsp; **🌍 Makro Pusula:** {macro_liq_lbl}" if macro_liq_lbl and macro_liq_lbl != "Makro Likidite Dengeli" else "")
 )
+contradiction_veto_act = getattr(fc_active, "contradiction_veto_tr", "")
+if contradiction_veto_act:
+    st.warning(f"**Çoklu Zaman Dilimi & Para Akışı Çelişki Kilidi Devrede:** {contradiction_veto_act}")
 
 trend_state_act = getattr(fc_active, "trend_state", "")
 swing_struct_act = getattr(fc_active, "swing_structure_tr", "Yatay Kanal")

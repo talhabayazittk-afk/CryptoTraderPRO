@@ -284,8 +284,8 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         kb_fut_rad = build_futures_radar_inline_keyboard([{"symbol": "ETH/USDT", "price": curr_p, "fc": fc}])
         self.assertGreaterEqual(len(kb_fut_rad["inline_keyboard"]), 3)
         kb_main = build_main_reply_keyboard()
-        self.assertEqual(len(kb_main["keyboard"]), 2)
-        self.assertEqual(kb_main["keyboard"][1][0]["text"], "🚀 Tümünü Tara (4H)")
+        self.assertEqual(len(kb_main["keyboard"]), 3)
+        self.assertEqual(kb_main["keyboard"][0][1]["text"], "🐋 Piyasa Avcısı (Top 80)")
         kb_coins = build_coin_list_inline_keyboard(["BTC/USDT", "ETH/USDT", "ONDO/USDT"])
         self.assertGreaterEqual(len(kb_coins["inline_keyboard"]), 4)
         kb_wm_add = build_watchlist_manage_inline_keyboard(["BTC/USDT", "ETH/USDT"], mode="add", timeframe="4H")
@@ -584,6 +584,284 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         self.assertIn("Short Squeeze", fc_sqz.spot_perp_quality_tr)
         self.assertGreater(fc_sqz.money_flow_score, fc_foam.money_flow_score + 15.0)
         self.assertGreater(fc_sqz.macro_htf_score, fc_foam.macro_htf_score + 15.0)
+
+    def test_phase3_pipeline_contradiction_lock_oi_liq_and_sqlite_ledger(self):
+        import tempfile
+        from pathlib import Path
+        from src.signal_ledger import SignalLedger, format_ledger_telegram_html
+        from src.signals import FuturesSetupReport, MarketForecast
+        from src.x_publisher import format_ledger_scorecard_x_post
+
+        # 1. Multi-Timeframe & Real Cash-Flow Hard Contradiction Lock
+        # Build a strong short-term upward bounce on LTF, while HTF (-48) & Spot Flow (-$4M) are heavily bearish
+        now_utc = datetime.now(timezone.utc)
+        rows = []
+        p = 100.0
+        for i in range(160):
+            p = p * 1.004 if i > 130 else p * 0.999
+            rows.append(
+                {
+                    "timestamp": now_utc - timedelta(hours=160 - i),
+                    "open": p * 0.998,
+                    "high": p * 1.005,
+                    "low": p * 0.995,
+                    "close": p,
+                    "volume": 2500.0,
+                    "real_net_delta_usd": -25_000.0,
+                    "has_real_taker_flow": True,
+                    "is_closed": i < 159,
+                }
+            )
+        ltf_bounce_df = pd.DataFrame(rows)
+        enr_bounce = self.signals.evaluate(self.detector.detect_all(self.indicators.enrich(ltf_bounce_df)))
+
+        bear_macro_flow = OrderFlowIntel(
+            symbol="SOL/USDT",
+            exchange="BINANCE",
+            spot_delta_1h_usd=-900_000.0,
+            spot_delta_4h_usd=-4_200_000.0,
+            spot_delta_24h_usd=-14_000_000.0,
+            perp_delta_4h_usd=3_500_000.0,
+            funding_rate_pct=0.032,
+            oi_weighted_funding_pct=0.032,
+            oi_change_24h_pct=5.5,
+            futures_taker_buy_sell_ratio=1.10,
+        )
+        fc_locked = self.signals.generate_forecast(
+            enr_bounce,
+            order_flow=bear_macro_flow,
+            htf_score=-48.0,
+            btc_regime_score=-35.0,
+            symbol="SOL/USDT",
+        )
+        self.assertLessEqual(fc_locked.score, 12.0)
+        self.assertNotEqual(fc_locked.trend_state, "UPTREND")
+        self.assertNotEqual(fc_locked.futures_setup.direction, "LONG")
+
+        # 2. OI & Funding-Weighted Dynamic Liquidation Magnets
+        crowded_longs = OrderFlowIntel(
+            symbol="BTC/USDT",
+            exchange="BINANCE",
+            aggregated_oi_usd=1_800_000_000.0,
+            oi_change_24h_pct=8.0,
+            oi_weighted_funding_pct=0.045,
+            long_short_ratio=1.75,
+        )
+        crowded_shorts = OrderFlowIntel(
+            symbol="BTC/USDT",
+            exchange="BINANCE",
+            aggregated_oi_usd=1_800_000_000.0,
+            oi_change_24h_pct=8.0,
+            oi_weighted_funding_pct=-0.035,
+            long_short_ratio=0.68,
+        )
+        pools_long_crowd = SmartMoneyEngine.estimate_liquidation_pools(enr_bounce, order_flow=crowded_longs)
+        pools_short_crowd = SmartMoneyEngine.estimate_liquidation_pools(enr_bounce, order_flow=crowded_shorts)
+
+        max_long_liq_when_longs_crowded = max(
+            (lp.density_score for lp in pools_long_crowd if lp.pool_type == "LONG_LIQ"), default=0.0
+        )
+        max_long_liq_when_shorts_crowded = max(
+            (lp.density_score for lp in pools_short_crowd if lp.pool_type == "LONG_LIQ"), default=0.0
+        )
+        self.assertGreater(max_long_liq_when_longs_crowded, max_long_liq_when_shorts_crowded)
+
+        # 3. SQLite Live Signal Scorecard & Conservative Intrabar Self-Verification
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "test_ledger.db"
+            ledger = SignalLedger(db_path=db_file)
+
+            t0 = datetime(2026, 11, 15, 12, 0, 0, tzinfo=timezone.utc)
+            sig_df = pd.DataFrame(
+                [{"timestamp": t0, "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "is_closed": False}]
+            )
+
+            # Build mock tradeable LONG forecast: Entry=100, Stop=98 (2% risk), TP1=103 (1.5R), TP2=106 (3.0R)
+            mock_fc = MarketForecast(
+                score=52.0,
+                confidence_pct=78.0,
+                verdict_tr="GÜÇLÜ POZİTİF EĞİLİM",
+                regime_tr="Trend Rejimi",
+                readiness_score_5=4,
+                data_health_ok=True,
+                futures_setup=FuturesSetupReport(
+                    is_tradeable=True,
+                    direction="LONG",
+                    confidence_score=78.0,
+                    confidence_grade="A",
+                    entry_price=100.0,
+                    tp1_price=103.0,
+                    tp2_price=106.0,
+                    tp3_price=109.0,
+                    stop_price=98.0,
+                    rr_ratio=2.25,
+                ),
+            )
+
+            # Case A: Same bar hits BOTH Stop (97.8 <= 98.0) and TP1 (103.5 >= 103.0) -> Conservative STOP_LOSS!
+            row_id_a = ledger.record_signal_if_qualified("ETH/USDT", "4H", "BINANCE", mock_fc, sig_df)
+            self.assertIsNotNone(row_id_a)
+            eval_df_a = pd.DataFrame(
+                [
+                    {"timestamp": t0, "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "is_closed": True},
+                    {"timestamp": t0 + timedelta(hours=4), "open": 100.0, "high": 103.5, "low": 97.8, "close": 101.0, "is_closed": True},
+                ]
+            )
+            closed_a = ledger.evaluate_open_signals_with_df("ETH/USDT", "4H", eval_df_a)
+            self.assertEqual(closed_a, 1)
+            sc_after_a = ledger.get_scorecard(days=30)
+            self.assertEqual(sc_after_a.losses_count, 1)
+            self.assertLess(sc_after_a.cumulative_net_r, -1.0)  # -1.0R minus 0.10% fee_r (-1.05R)
+
+            # Case B: TP1 hit on bar +1 (103.5), then Breakeven touched on bar +2 (99.8 <= 100.0) -> TP1_PARTIAL_WIN!
+            sig_df_b = pd.DataFrame(
+                [{"timestamp": t0 + timedelta(hours=8), "open": 100.0, "high": 100.4, "low": 99.6, "close": 100.0, "is_closed": False}]
+            )
+            row_id_b = ledger.record_signal_if_qualified("BTC/USDT", "4H", "BINANCE", mock_fc, sig_df_b)
+            self.assertIsNotNone(row_id_b)
+            eval_df_b = pd.DataFrame(
+                [
+                    {"timestamp": t0 + timedelta(hours=12), "open": 100.0, "high": 104.0, "low": 99.2, "close": 103.2, "is_closed": True},
+                    {"timestamp": t0 + timedelta(hours=16), "open": 103.2, "high": 103.4, "low": 99.8, "close": 100.1, "is_closed": True},
+                ]
+            )
+            closed_b = ledger.evaluate_open_signals_with_df("BTC/USDT", "4H", eval_df_b)
+            self.assertEqual(closed_b, 1)
+
+            # Case C: Full TP2 win on ONDO/USDT -> +2.20R net (0.5*1.5R + 0.5*3.0R - 0.05R fee)
+            row_id_c = ledger.record_signal_if_qualified("ONDO/USDT", "4H", "BINANCE", mock_fc, sig_df_b)
+            self.assertIsNotNone(row_id_c)
+            eval_df_c = pd.DataFrame(
+                [
+                    {"timestamp": t0 + timedelta(hours=12), "open": 100.0, "high": 106.5, "low": 99.5, "close": 106.2, "is_closed": True},
+                ]
+            )
+            closed_c = ledger.evaluate_open_signals_with_df("ONDO/USDT", "4H", eval_df_c)
+            self.assertEqual(closed_c, 1)
+
+            # Synthetic fallback data MUST NEVER be recorded into SQLite Ledger
+            rejected_syn = ledger.record_signal_if_qualified("ENA/USDT", "4H", "SIMULATED_FALLBACK", mock_fc, sig_df_b)
+            self.assertIsNone(rejected_syn)
+
+            sc_final = ledger.get_scorecard(days=30)
+            self.assertEqual(sc_final.closed_count, 3)
+            self.assertEqual(sc_final.wins_count, 2)
+            self.assertEqual(sc_final.losses_count, 1)
+            self.assertAlmostEqual(sc_final.cumulative_net_r, (-1.05) + 0.70 + 2.20, places=2)
+            self.assertGreater(sc_final.profit_factor, 2.5)
+
+            tg_ledger_html = format_ledger_telegram_html(sc_final)
+            self.assertIn("CANLI SİNYAL KARNESİ", tg_ledger_html)
+            x_ledger_tweets = format_ledger_scorecard_x_post(sc_final)
+            self.assertGreaterEqual(len(x_ledger_tweets), 1)
+            self.assertIn("Canlı Sinyal Karnesi", x_ledger_tweets[0])
+
+    def test_phase4_market_wide_hunter_math_and_anti_foam(self):
+        import time
+        from src.market_scanner import (
+            MarketHunterReport,
+            _compute_closed_bar_metrics,
+            _is_eligible_usdt_symbol,
+            _score_and_classify_candidate,
+            build_market_hunter_inline_keyboard,
+            format_market_hunter_telegram_html,
+        )
+        from src.x_publisher import format_market_hunter_x_post
+
+        # 1. Universe Filter: Stablecoins, Wrapped Pegs & Leveraged Tokens Excluded
+        self.assertEqual(_is_eligible_usdt_symbol("USDCUSDT"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("FDUSDUSDT"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("WBTCUSDT"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("BTCUPUSDT"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("ETHDOWNUSDT"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("ETHBTC"), (False, ""))
+        self.assertEqual(_is_eligible_usdt_symbol("SUIUSDT"), (True, "SUI/USDT"))
+
+        # 2. Closed-Candle Real Taker Delta + Z-Score + Squeeze + Unclosed Bar Guard
+        now_ms = int(time.time() * 1000)
+        klines_inflow = []
+        p = 10.0
+        for i in range(56):
+            open_ms = now_ms - (56 - i) * 3_600_000
+            # Index 55 is an UNCLOSED forming candle (close_ms in the future) with a massive fake dump
+            close_ms = open_ms + 3_599_999 if i < 55 else now_ms + 1_800_000
+            if i < 51:
+                p = 10.0 + (0.015 if i % 2 == 0 else -0.015)  # Tight volatility squeeze around $10.00
+                h_p, l_p = p + 0.02, p - 0.02
+                q_vol, tb_vol = 400_000.0, 202_000.0          # Near-balanced baseline (+4K net)
+            elif i < 55:
+                p = 10.05 + (i - 51) * 0.015                  # Coiling up inside squeeze
+                h_p, l_p = p + 0.025, p - 0.015
+                q_vol, tb_vol = 1_500_000.0, 1_150_000.0      # Real aggressive Spot Taker buying (+800K/bar!)
+            else:
+                # Unclosed bar with huge fake sell-off (-$90M) that MUST be ignored!
+                h_p, l_p = 10.15, 9.50
+                q_vol, tb_vol = 100_000_000.0, 5_000_000.0
+            klines_inflow.append([open_ms, p, h_p, l_p, p, 1000.0, close_ms, q_vol, 500, 600, tb_vol, 0])
+
+        cand_good = _compute_closed_bar_metrics(
+            raw_klines=klines_inflow,
+            timeframe="1H",
+            live_price_hint=10.10,
+            change_24h_pct=2.4,
+            quote_vol_24h_usd=48_000_000.0,
+            funding_rate_pct=-0.012,
+            symbol="SUI/USDT",
+        )
+        self.assertIsNotNone(cand_good)
+        # 4 closed inflow bars: each has tb=1.15M, ts=0.35M -> net +800K * 4 = +$3,200,000!
+        self.assertAlmostEqual(cand_good.spot_delta_4bar_usd, 3_200_000.0, places=2)
+        self.assertGreater(cand_good.delta_zscore, 2.0)
+        self.assertGreater(cand_good.rvol, 2.5)
+        cand_good.perp_delta_4bar_usd = -900_000.0  # Retail shorting Perp while Spot accumulates
+        cand_good = _score_and_classify_candidate(cand_good)
+        self.assertTrue(cand_good.is_qualified_pick)
+        self.assertEqual(cand_good.spot_perp_quality_code, "SHORT_SQUEEZE_FUEL")
+        self.assertGreaterEqual(cand_good.hunter_score, 70.0)
+
+        # 3. Leverage Foam Candidate (Spot Selling while Perp Buying + High Positive Funding) -> Disqualified!
+        klines_foam = []
+        for i in range(55):
+            open_ms = now_ms - (56 - i) * 3_600_000
+            close_ms = open_ms + 3_599_999
+            q_vol = 800_000.0
+            tb_vol = 400_000.0 if i < 51 else 200_000.0  # Last 4 closed bars: Spot dumping (-400K/bar)
+            klines_foam.append([open_ms, 5.0, 5.05, 4.95, 5.02, 1000.0, close_ms, q_vol, 300, 300, tb_vol, 0])
+
+        cand_foam = _compute_closed_bar_metrics(
+            raw_klines=klines_foam,
+            timeframe="1H",
+            live_price_hint=5.02,
+            change_24h_pct=1.5,
+            quote_vol_24h_usd=30_000_000.0,
+            funding_rate_pct=0.038,
+            symbol="FAKE/USDT",
+        )
+        cand_foam.perp_delta_4bar_usd = 2_500_000.0
+        cand_foam = _score_and_classify_candidate(cand_foam)
+        self.assertFalse(cand_foam.is_qualified_pick)
+        self.assertEqual(cand_foam.spot_perp_quality_code, "LEVERAGE_FOAM")
+
+        rep = MarketHunterReport(
+            scanned_at_utc="2026-11-16 14:45:00 UTC",
+            timeframe="1H",
+            exchange_source="BINANCE SPOT + USD-M PERP",
+            universe_scanned=80,
+            min_quote_vol_usd=15_000_000.0,
+            inflow_positive_count=42,
+            squeezing_count=19,
+            total_top_spot_net_4bar_usd=28_500_000.0,
+            total_top_spot_net_24h_usd=94_000_000.0,
+            top_picks=[cand_good],
+            all_ranked=[cand_good, cand_foam],
+        )
+        tg_h = format_market_hunter_telegram_html(rep)
+        self.assertIn("SUI", tg_h)
+        self.assertIn("+$3.20M", tg_h)
+        kb_h = build_market_hunter_inline_keyboard(rep)
+        self.assertTrue(len(kb_h["inline_keyboard"]) >= 3)
+        tw_h = format_market_hunter_x_post(rep)
+        self.assertIn("$SUI", tw_h[0])
 
 
 if __name__ == "__main__":

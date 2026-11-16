@@ -13,10 +13,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from src.config import AnalysisConfig, ChartConfig, ExchangeConfig, IndicatorConfig, PatternConfig
-from src.data_fetcher import CryptoDataFetcher
-from src.indicators import TechnicalIndicators
-from src.patterns import CandlestickPatternDetector
-from src.signals import MarketForecast, SignalEngine
+from src.pipeline import AnalysisPipeline
+from src.signals import MarketForecast
 from src.visualizer import InteractiveChartVisualizer
 
 DEFAULT_COINS = ["ETH/USDT", "ONDO/USDT", "BTC/USDT", "ENA/USDT"]
@@ -120,54 +118,22 @@ def analyze_coin_multi_timeframe(
         chart=ChartConfig(output_html=output_file),
     )
 
-    fetcher = CryptoDataFetcher(base_config.exchange)
-    indicators = TechnicalIndicators(base_config.indicators)
-    detector = CandlestickPatternDetector(base_config.patterns)
-    signal_engine = SignalEngine(base_config.indicators)
-
-    # 1. Parallel fetch all timeframes + OrderBook & Futures Intelligence
-    raw_tf_dict, source_used = fetcher.fetch_multi_timeframe_parallel(
+    bundle = AnalysisPipeline.run_coin_bundle(
         symbol=symbol,
+        exchange_id=exchange,
         timeframes=timeframes,
         limit=limit,
-        exchange_id=exchange,
+        btc_regime_scores=btc_regime_scores,
+        btc_tf_data=btc_tf_data,
+        allow_synthetic_fallback=False,
+        enable_ledger=True,
     )
-    order_flow = fetcher.fetch_order_flow_intel(symbol=symbol, exchange_id=exchange)
-
-    tf_data: Dict[str, pd.DataFrame] = {}
-    tf_forecasts: Dict[str, MarketForecast] = {}
-    coin_scores: Dict[str, float] = {}
-
-    # 2. Enrich and evaluate from Highest Timeframe (e.g., 1D -> 4H -> 1H) so HTF score feeds into LTF
+    tf_data = bundle.tf_data
+    tf_forecasts = bundle.tf_forecasts
+    order_flow = bundle.order_flow
+    source_used = bundle.source_used
+    coin_scores = bundle.mtf_scores
     ordered_tfs = [tf.upper() for tf in timeframes]
-    for tf_key in ordered_tfs:
-        df_ind = indicators.enrich(raw_tf_dict[tf_key])
-        df_pat = detector.detect_all(df_ind)
-        tf_data[tf_key] = signal_engine.evaluate(df_pat)
-
-    htf_prev_score: Optional[float] = None
-    for tf_key in reversed(ordered_tfs):
-        df_final = tf_data[tf_key]
-        btc_score = (
-            btc_regime_scores.get(tf_key)
-            if (btc_regime_scores and not symbol.startswith("BTC/"))
-            else None
-        )
-        btc_df = btc_tf_data.get(tf_key) if btc_tf_data else None
-        fc = signal_engine.generate_forecast(
-            df_final,
-            order_flow=order_flow,
-            htf_score=htf_prev_score,
-            btc_regime_score=btc_score,
-            symbol=symbol,
-            btc_df=btc_df,
-        )
-        tf_forecasts[tf_key] = fc
-        coin_scores[tf_key] = fc.score
-        htf_prev_score = fc.score
-
-    # Restore original timeframe ordering in dictionary
-    tf_forecasts = {k: tf_forecasts[k] for k in ordered_tfs}
 
     print("\n" + "=" * 106)
     print(f"  📊 {symbol} — KURUMSAL ÇOK KATMANLI YÖN, SMC, OLASILIK KONİSİ & GERÇEKÇİ BACKTEST RAPORU (v3.0)")

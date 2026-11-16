@@ -3,7 +3,7 @@ Smart Money Concepts (SMC), Liquidation Magnet Pools, Probability Cone (Monte Ca
 Relative Strength vs BTC (RS/Beta), and Risk/Position Sizing Engine (v3.0).
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -362,52 +362,83 @@ class SmartMoneyEngine:
         return recent_events, struct_summary, liq_summary
 
     @staticmethod
-    def estimate_liquidation_pools(df: pd.DataFrame) -> List[LiquidationPool]:
+    def estimate_liquidation_pools(df: pd.DataFrame, order_flow: Optional[Any] = None) -> List[LiquidationPool]:
         """
-        Volume-Weighted Multi-Tier (10x, 25x, 50x) Liquidation Density Estimator (v4.0):
-            Scans swing highs and lows across the recent 80 bars, weights each pivot by
-            its Relative Volume (`rvol`), projects 50x (~1.8%), 25x (~3.6%), and 10x (~8.5%)
-            liquidation clusters, and returns the highest-density Short & Long magnet zones.
+        Phase 3 OI, Funding & Volatility-Aware Multi-Tier (10x, 25x, 50x) Liquidation Density Estimator:
+            - Strictly scans CLOSED candles (`is_closed == True`) to prevent live-wick shifts
+            - Weights pivots by Relative Volume (`rvol`) and Taker Z-Score intensity (`delta_zscore`)
+            - Incorporates live Open Interest (`oi_change_24h_pct`), OI-Weighted Funding Rate, and Long/Short Ratio
+              to amplify crowded Long (`LONG_LIQ`) vs crowded Short (`SHORT_LIQ`) liquidation magnets!
         """
         if len(df) < 15:
             return []
 
-        sub = df.tail(80).reset_index(drop=True)
+        closed_df = df.iloc[:-1] if (len(df) >= 16 and "is_closed" in df.columns and not bool(df["is_closed"].iloc[-1])) else df
+        sub = closed_df.tail(90).reset_index(drop=True)
         highs = sub["high"].values
         lows = sub["low"].values
         closes = sub["close"].values
         rvols = sub["rvol"].values if "rvol" in sub.columns else np.ones(len(sub))
-        current_price = float(closes[-1])
+        zscores = np.abs(sub["delta_zscore"].values) if "delta_zscore" in sub.columns else np.zeros(len(sub))
+        current_price = float(df["close"].iloc[-1])
         atr_val = float(sub["atr"].iloc[-1]) if "atr" in sub.columns and pd.notna(sub["atr"].iloc[-1]) else current_price * 0.008
         band_half = max(atr_val * 0.18, current_price * 0.0015)
         cluster_tol = max(atr_val * 0.45, current_price * 0.004)
 
+        # Compute OI & Funding Crowding Asymmetry Multipliers (Strictly from real derivative metrics)
+        short_crowd_mult = 1.0
+        long_crowd_mult = 1.0
+        short_crowd_note = ""
+        long_crowd_note = ""
+        if order_flow is not None:
+            fr = getattr(order_flow, "oi_weighted_funding_pct", None)
+            if fr is None:
+                fr = getattr(order_flow, "funding_rate_pct", None)
+            ls_r = getattr(order_flow, "long_short_ratio", None)
+            oi_chg = getattr(order_flow, "oi_change_24h_pct", None)
+
+            if (fr is not None and fr >= 0.015) or (ls_r is not None and ls_r >= 1.25):
+                long_crowd_mult *= 1.42
+                long_crowd_note = " • 🔥 Kalabalık Long Hedefi"
+            if (fr is not None and fr <= -0.005) or (ls_r is not None and ls_r <= 0.85):
+                short_crowd_mult *= 1.42
+                short_crowd_note = " • 🚀 Short Squeeze Mıknatısı"
+            if oi_chg is not None:
+                if oi_chg >= 2.5:
+                    short_crowd_mult *= 1.18
+                    long_crowd_mult *= 1.18
+                elif oi_chg <= -3.0:
+                    # Positions recently flushed -> dampen stale liquidation density
+                    short_crowd_mult *= 0.78
+                    long_crowd_mult *= 0.78
+
         short_candidates: List[Tuple[float, float, str]] = []
         long_candidates: List[Tuple[float, float, str]] = []
 
-        # Collect swing pivots and project multi-tier leverage liquidation levels
+        # Collect closed-candle swing pivots and project 50x, 25x, and 10x leverage liquidation levels
         win = 3
         for i in range(win, len(sub) - 1):
             right_b = min(len(sub), i + win + 1)
-            w = float(np.clip(rvols[i], 0.6, 3.5))
+            intensity = 1.0 + 0.18 * float(np.clip(zscores[i], 0.0, 3.0))
+            w = float(np.clip(rvols[i] * intensity, 0.6, 4.2))
             if highs[i] == np.max(highs[i - win : right_b]):
-                for mult, tag in ((1.018, "50x"), (1.035, "25x")):
+                for mult, tag, tier_w in ((1.018, "50x", 1.0), (1.036, "25x", 0.90), (1.082, "10x", 0.65)):
                     lvl = float(highs[i] * mult)
                     if lvl > current_price * 1.002:
-                        short_candidates.append((lvl, w, tag))
+                        short_candidates.append((lvl, w * tier_w * short_crowd_mult, tag))
             if lows[i] == np.min(lows[i - win : right_b]):
-                for mult, tag in ((0.982, "50x"), (0.965, "25x")):
+                for mult, tag, tier_w in ((0.982, "50x", 1.0), (0.964, "25x", 0.90), (0.918, "10x", 0.65)):
                     lvl = float(lows[i] * mult)
                     if lvl < current_price * 0.998:
-                        long_candidates.append((lvl, w, tag))
+                        long_candidates.append((lvl, w * tier_w * long_crowd_mult, tag))
 
-        # Always include 45-bar extreme fallback
+        # Always include 45-bar closed extreme fallback
         swing_high = float(sub["high"].tail(45).max())
         swing_low = float(sub["low"].tail(45).min())
         if swing_high * 1.018 > current_price:
-            short_candidates.append((swing_high * 1.018, 1.5, "50x"))
+            short_candidates.append((swing_high * 1.018, 1.5 * short_crowd_mult, "50x"))
         if swing_low * 0.982 < current_price:
-            long_candidates.append((swing_low * 0.982, 1.5, "50x"))
+            long_candidates.append((swing_low * 0.982, 1.5 * long_crowd_mult, "50x"))
 
         def pick_best_cluster(cands: List[Tuple[float, float, str]], is_short: bool) -> Optional[LiquidationPool]:
             if not cands:
@@ -428,7 +459,7 @@ class SmartMoneyEngine:
                 if not placed:
                     clusters.append(([p_val], w_val, [t_str]))
 
-            # Rank by density weight divided by distance penalty so nearby dense clusters win
+            # Rank by density weight divided by distance penalty so nearby dense OI-backed clusters win
             best_c = max(
                 clusters,
                 key=lambda c: c[1] / max(abs(float(np.mean(c[0])) - current_price) / current_price, 0.008),
@@ -440,7 +471,7 @@ class SmartMoneyEngine:
                 dist = ((lvl_p - current_price) / current_price) * 100.0
                 return LiquidationPool(
                     pool_type="SHORT_LIQ",
-                    leverage_tag=f"🧲 {tiers} Short Likidasyon Havuzu (Yoğunluk: {density:.1f}x)",
+                    leverage_tag=f"🧲 {tiers} Short Likidasyon Havuzu (Yoğunluk: {density:.1f}x{short_crowd_note})",
                     price=lvl_p,
                     band_low=lvl_p - band_half,
                     band_high=lvl_p + band_half,
@@ -451,7 +482,7 @@ class SmartMoneyEngine:
                 dist = ((current_price - lvl_p) / current_price) * 100.0
                 return LiquidationPool(
                     pool_type="LONG_LIQ",
-                    leverage_tag=f"🧲 {tiers} Long Likidasyon Havuzu (Yoğunluk: {density:.1f}x)",
+                    leverage_tag=f"🧲 {tiers} Long Likidasyon Havuzu (Yoğunluk: {density:.1f}x{long_crowd_note})",
                     price=lvl_p,
                     band_low=lvl_p - band_half,
                     band_high=lvl_p + band_half,
@@ -719,11 +750,12 @@ class SmartMoneyEngine:
         bear_invalid: float,
         symbol: str = "BTC/USDT",
         btc_df: Optional[pd.DataFrame] = None,
+        order_flow: Optional[Any] = None,
     ) -> SmartMoneyReport:
         fvgs = self.detect_unfilled_fvgs(df)
         obs = self.detect_order_blocks(df)
         events, struct_sum, liq_sum = self.detect_structure_and_sweeps(df)
-        liq_pools = self.estimate_liquidation_pools(df)
+        liq_pools = self.estimate_liquidation_pools(df, order_flow=order_flow)
         cone = self.compute_probability_cone(df, composite_score, bull_target, bear_invalid)
         rs = self.compute_relative_strength_vs_btc(df, btc_df, symbol)
 

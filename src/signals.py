@@ -271,6 +271,7 @@ class MarketForecast:
     macro_liquidity_tr: str = "Makro Likidite Dengeli"
     aggregated_oi_usd: Optional[float] = None
     oi_weighted_funding_pct: Optional[float] = None
+    contradiction_veto_tr: str = ""
 
 
 class SignalEngine:
@@ -2039,6 +2040,33 @@ class SignalEngine:
         elif chop_val >= 59.5 and adx_val < 20.0 and not has_bull_break and not has_bear_break:
             composite *= 0.68
 
+        # Phase 3 Multi-Timeframe & Real Cash-Flow Hard Contradiction Lock (Zero Counter-Trend Hallucination)
+        contradiction_veto_tr = ""
+        if (
+            htf_score is not None
+            and htf_score <= -30.0
+            and (mf_score <= -8.0 or (spot_d24h is not None and spot_d24h < 0))
+            and not has_bull_break
+            and composite > 12.0
+        ):
+            composite = min(composite, 12.0)
+            contradiction_veto_tr = (
+                f"🔒 Üst Periyot Çelişki Kilidi: Ana trend ({htf_score:+.0f}) ve gerçek nakit akışı negatif olduğu için "
+                "alt periyottaki sıçrama 'Yükselen Trend' sayılmaz (Kısa Vadeli Tepki Adayı)."
+            )
+        elif (
+            htf_score is not None
+            and htf_score >= 30.0
+            and (mf_score >= 8.0 or (spot_d24h is not None and spot_d24h > 0))
+            and not has_bear_break
+            and composite < -12.0
+        ):
+            composite = max(composite, -12.0)
+            contradiction_veto_tr = (
+                f"🔒 Üst Periyot Çelişki Kilidi: Ana trend ({htf_score:+.0f}) ve gerçek nakit akışı pozitif olduğu için "
+                "alt periyottaki geri çekilme 'Düşen Trend' sayılmaz (Trend İçi Düzeltme)."
+            )
+
         composite = float(np.clip(composite, -100.0, 100.0))
 
         # Canonical Trend State Classification: UPTREND, DOWNTREND, SIDEWAYS
@@ -2147,6 +2175,7 @@ class SignalEngine:
             bear_invalid=cone_bear_b,
             symbol=symbol,
             btc_df=btc_df,
+            order_flow=order_flow,
         )
 
         prob_bull_pct = smc_report.probability_cone.prob_touch_bull_target_pct
@@ -2282,6 +2311,9 @@ class SignalEngine:
             sr_action_type=sr_action_type,
             sr_action_status_tr=sr_action_status_tr,
             trendlines=trendlines,
+            data_health_ok=data_health_ok,
+            spot_perp_quality_tr=spot_perp_quality_tr,
+            contradiction_veto_tr=contradiction_veto_tr,
         )
 
         # Synchronize canonical TP1 / TP2 / Stop & Risk Plan with Futures Setup when a valid setup exists
@@ -2524,6 +2556,7 @@ class SignalEngine:
             macro_liquidity_tr=macro_liquidity_tr,
             aggregated_oi_usd=agg_oi_usd,
             oi_weighted_funding_pct=oi_w_funding,
+            contradiction_veto_tr=contradiction_veto_tr,
         )
 
     @staticmethod
@@ -2555,6 +2588,9 @@ class SignalEngine:
         sr_action_type: str = "NONE",
         sr_action_status_tr: str = "",
         trendlines: Optional[DynamicTrendlineReport] = None,
+        data_health_ok: bool = True,
+        spot_perp_quality_tr: str = "",
+        contradiction_veto_tr: str = "",
     ) -> FuturesSetupReport:
         """
         Institutional Perpetual Futures (Vadeli İşlemler) Setup, Confidence & Hard Risk Gate Engine (v8.0).
@@ -2955,6 +2991,20 @@ class SignalEngine:
         else:
             if cand_dir in ("LONG", "SHORT"):
                 conf_pts += 5.5
+
+        # Pillar G: Phase 3 Hard Integrity, Contradiction Lock & Leverage Foam Trap Gates
+        if not data_health_ok:
+            veto_reasons.insert(
+                0,
+                "🛑 Veri Sağlığı Kalkanı: Borsa verisi bayat veya hacimsiz olduğu için vadeli işlem sinyali kilitlendi.",
+            )
+        if contradiction_veto_tr:
+            veto_reasons.insert(0, contradiction_veto_tr)
+        if cand_dir == "LONG" and "KALDIRAÇ KÖPÜĞÜ" in spot_perp_quality_tr:
+            conf_pts -= 12.0
+            warnings.insert(0, spot_perp_quality_tr)
+            if conf_pts < 65.0:
+                veto_reasons.append(spot_perp_quality_tr)
 
         confidence_score = float(np.clip(round(conf_pts, 1), 12.0, 98.0))
         if confidence_score < 62.0 and not veto_reasons:

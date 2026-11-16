@@ -39,7 +39,14 @@ import pandas as pd
 from src.config import AnalysisConfig, ExchangeConfig
 from src.data_fetcher import CryptoDataFetcher
 from src.indicators import TechnicalIndicators
+from src.market_scanner import (
+    MarketWideHunter,
+    build_market_hunter_inline_keyboard,
+    format_market_hunter_telegram_html,
+)
 from src.patterns import CandlestickPatternDetector
+from src.pipeline import AnalysisPipeline
+from src.signal_ledger import SignalLedger, format_ledger_telegram_html
 from src.signals import MarketForecast, SignalEngine
 import src.telegram_notifier as _tg_notifier
 from src.telegram_notifier import (
@@ -80,6 +87,8 @@ from src.x_publisher import (
     format_coin_analysis_x_post,
     format_futures_radar_x_post,
     format_futures_setup_x_post,
+    format_ledger_scorecard_x_post,
+    format_market_hunter_x_post,
     format_market_overview_x_post,
     format_radar_alert_x_post,
     format_screener_x_post,
@@ -281,64 +290,19 @@ def _compute_full_coin_bundle(
             btc_tf_data_ref = None
             btc_scores_ref = None
 
-    cfg = AnalysisConfig(
-        exchange=ExchangeConfig(primary_exchange=ex_choice, symbol=sym_key, timeframe=tf, limit=500),
+    bundle = AnalysisPipeline.run_coin_bundle(
+        symbol=sym_key,
+        exchange_id=ex_choice,
+        timeframes=("15m", "1h", "4h", "1d"),
+        limit=500,
+        btc_regime_scores=btc_scores_ref,
+        btc_tf_data=btc_tf_data_ref,
+        allow_synthetic_fallback=allow_synthetic_fallback,
+        enable_ledger=True,
     )
-    fetcher = CryptoDataFetcher(cfg.exchange)
-
-    # Fetch 4 timeframes (500-bar institutional warmup) AND OrderFlowIntel concurrently
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_tf = ex.submit(
-            fetcher.fetch_multi_timeframe_parallel,
-            symbol=sym_key,
-            timeframes=["15m", "1h", "4h", "1d"],
-            limit=500,
-            exchange_id=ex_choice,
-            allow_synthetic_fallback=allow_synthetic_fallback,
-        )
-        fut_intel = ex.submit(fetcher.fetch_order_flow_intel, symbol=sym_key, exchange_id=ex_choice)
-        raw_tf_dict, _ = fut_tf.result()
-        intel = fut_intel.result()
-
-    ind = TechnicalIndicators(cfg.indicators)
-    pat = CandlestickPatternDetector(cfg.patterns)
-    sig = SignalEngine(cfg.indicators)
-
-    ordered_tfs = ["15M", "1H", "4H", "1D"]
-    tf_data: Dict[str, pd.DataFrame] = {}
-    for k in ordered_tfs:
-        df_i = ind.enrich(raw_tf_dict[k])
-        df_p = pat.detect_all(df_i)
-        tf_data[k] = sig.evaluate(df_p)
-
-    tf_forecasts: Dict[str, MarketForecast] = {}
-    mtf_scores: Dict[str, float] = {}
-    htf_prev: Optional[float] = None
-    htf_sr_pool: List[Any] = []
-    for k in reversed(ordered_tfs):
-        btc_sc_k = btc_scores_ref.get(k) if (btc_scores_ref and not sym_key.startswith("BTC/")) else None
-        btc_df_k = btc_tf_data_ref.get(k) if (btc_tf_data_ref and not sym_key.startswith("BTC/")) else None
-        gf_kwargs: Dict[str, Any] = {
-            "order_flow": intel,
-            "htf_score": htf_prev,
-            "btc_regime_score": btc_sc_k,
-            "symbol": sym_key,
-            "btc_df": btc_df_k,
-        }
-        try:
-            import inspect as _insp
-            if "htf_sr_levels" in _insp.signature(sig.generate_forecast).parameters:
-                gf_kwargs["htf_sr_levels"] = list(htf_sr_pool) if htf_sr_pool else None
-        except Exception:
-            pass
-        fc_k = sig.generate_forecast(tf_data[k], **gf_kwargs)
-        tf_forecasts[k] = fc_k
-        mtf_scores[k] = fc_k.score
-        htf_prev = fc_k.score
-        if k in ("1D", "4H"):
-            htf_sr_pool.extend(fc_k.support_levels[:2])
-            htf_sr_pool.extend(fc_k.resistance_levels[:2])
-
+    tf_data = bundle.tf_data
+    tf_forecasts = bundle.tf_forecasts
+    mtf_scores = bundle.mtf_scores
     df_active = tf_data[tf_key]
     fc_active = tf_forecasts[tf_key]
     current_price = float(df_active["close"].iloc[-1])
@@ -599,6 +563,8 @@ def _build_help_html(chat_id: str) -> str:
         "Artık yazı yazmanıza gerek kalmadan <b>ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
         "🚨 <b>Destek / Direnç Kırılım &amp; Tuzak (SFP) Radarı:</b>\n"
         "• <code>/kirilim 4h</code> — <b>Direnç Kırılımı Geldi</b>, <b>Destek Kırılımı Geldi</b>, <b>Sahte Kırılım (Tuzak)</b> ve <b>Retest</b> onaylarını listeler\n\n"
+        "🐋 <b>Tüm Piyasa Spot Nakit Girişi &amp; Sıkışma Avcısı (Top 80):</b>\n"
+        "• <code>/avci 1h</code> veya <code>/avci 4h</code> — Borsadaki en likit 80 USDT tahtasını gerçek Taker Spot nakit akışı, Z-Skor ve sıkışma filtresiyle tarar (<code>/xavci</code> ile X'te paylaşır)\n\n"
         "⚡ <b>Vadeli İşlemler (Futures) Kurulum &amp; Güven Radarı:</b>\n"
         "• <code>/vadeli ONDO 4h</code> — Vadeli Long/Short Giriş, TP1/TP2/TP3 ve Stop Planı + Vadeli Grafik\n"
         "• <code>/vadelitara 4h</code> — Tüm Coinleri Tarar, Güvenli Vadeli Kurulumları Ayırır\n\n"
@@ -614,9 +580,10 @@ def _build_help_html(chat_id: str) -> str:
         "⏰ <b>Alarm &amp; 7/24 Otomatik Radar (Telegram + X):</b>\n"
         "• <code>/alarm ONDO 0.3620</code> — Hedef Fiyata Anlık Bildirim Alarmı Kurar\n"
         "• <code>/alarmlar</code> veya <code>/radar</code> — 7/24 Otomatik Kırılım Radarı &amp; Alarm Kontrol Paneli\n\n"
-        "🐦 <b>X (Twitter) Otomatik &amp; Tek Tıkla Paylaşım Komutları:</b>\n"
-        "• <code>/x ONDO 4h</code> — Coinin analizini ve grafiğini anında X hesabınızda paylaşır\n"
-        "• <code>/xvadeli ONDO 4h</code> — Vadeli İşlem Planını ve grafiğini X'te paylaşır\n"
+        "🐦 <b>X (Twitter) &amp; Şeffaf Sinyal Karnesi Komutları:</b>\n"
+        "• <code>/karne</code> — SQLite Canlı Sinyal Karnesi &amp; Gerçek Başarı Oranı (%0.10 komisyon dahil)\n"
+        "• <code>/x ONDO 4h</code> — Coinin analizini ve grafiğini X hesabınızda paylaşır\n"
+        "• <code>/xvadeli ONDO 4h</code> | <code>/xkarne</code> — Vadeli Planı veya Sinyal Karnesini X'te paylaşır\n"
         "• <code>/xtara 4h</code> | <code>/xkirilim 4h</code> | <code>/xpiyasa 4h</code> — Tarama ve Piyasa raporunu X'te paylaşır\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 <b>Chat ID:</b> <code>{chat_id}</code> (Yatırım tavsiyesi değildir - YTD)"
@@ -1419,6 +1386,62 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
                 reply_markup=kb_x_free,
             )
 
+    elif action == "hunter":
+        tf = parts[1] if len(parts) >= 2 else "1H"
+        only_unlisted = (parts[2] == "1") if len(parts) >= 3 else False
+        force_ref = (parts[3] == "1") if len(parts) >= 4 else False
+        answer_callback_query(bot_token, cq_id, f"🐋 Top 80 Piyasa Avcısı [{tf}] taranıyor...")
+        if force_ref and not is_photo_msg and msg_id:
+            edit_telegram_message(
+                bot_token,
+                chat_id,
+                msg_id,
+                f"🐋 <b>[{tf.upper()}]</b> Borsadaki en likit 80 USDT tahtasının gerçek Spot Taker nakit girişleri ve sıkışma enerjileri canlı taranıyor...",
+            )
+        wl = _load_shared_watchlist()
+        rep = MarketWideHunter.scan_market(
+            timeframe=tf.lower(),
+            universe_size=80,
+            min_quote_vol_usd=2_500_000.0,
+            top_n=10,
+            watchlist=wl,
+            force_refresh=force_ref,
+        )
+        html_h = format_market_hunter_telegram_html(rep, only_unlisted=only_unlisted)
+        kb_h = build_market_hunter_inline_keyboard(rep, only_unlisted=only_unlisted)
+        if not is_photo_msg and msg_id:
+            if not edit_telegram_message(bot_token, chat_id, msg_id, html_h, reply_markup=kb_h):
+                send_telegram_message(bot_token, chat_id, html_h, reply_markup=kb_h)
+        else:
+            send_telegram_message(bot_token, chat_id, html_h, reply_markup=kb_h)
+
+    elif action == "x_hunter":
+        tf = parts[1] if len(parts) >= 2 else "1H"
+        answer_callback_query(bot_token, cq_id, f"🐦 Top 80 Piyasa Avcısı [{tf}] X'te paylaşılıyor...")
+        wl = _load_shared_watchlist()
+        rep = MarketWideHunter.scan_market(timeframe=tf.lower(), universe_size=80, watchlist=wl)
+        tweets = format_market_hunter_x_post(rep)
+        top_png = None
+        if rep.top_picks:
+            try:
+                top_sym = rep.top_picks[0].symbol
+                df_top, fc_top, _, _, _ = _compute_full_coin_bundle(top_sym, tf.lower())
+                top_png = generate_telegram_chart_png(df_top, fc_top, top_sym, tf.upper(), include_futures_levels=False)
+            except Exception:
+                top_png = None
+        ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=top_png, title=f"Top 80 Piyasa Avcısı ({tf.upper()})", symbol="AVCI")
+        if ok_x:
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>X (Twitter) Paylaşım Durumu:</b>\n{msg_x}")
+        else:
+            intent_u = build_x_intent_url(tweets[0])
+            kb_x_free = {"inline_keyboard": [[{"text": "🐦 Tek Dokunuşla X Uygulamasında Aç & Paylaş (Ücretsiz)", "url": intent_u}]]}
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐦 <b>Ücretsiz X Piyasa Avcısı Paketi:</b>\n\n<pre>{tweets[0]}</pre>",
+                reply_markup=kb_x_free,
+            )
+
     else:
         answer_callback_query(bot_token, cq_id, "✅ İşlem alındı.")
 
@@ -1432,6 +1455,10 @@ def _map_reply_keyboard_text(raw_text: str) -> str:
     t_low = t.lower()
     if "coin seç" in t_low or "coin listesi" in t_low or t.startswith("🪙"):
         return "/liste"
+    if "avcı" in t_low or "avci" in t_low or "top 80" in t_low or t.startswith("🐋"):
+        return "/avci 1h"
+    if "sinyal karnesi" in t_low or t.startswith("📊"):
+        return "/karne"
     if "kırılım" in t_low or "kirilim" in t_low or t.startswith("🚨"):
         return "/kirilim 4h"
     if "vadeli" in t_low or t.startswith("⚡"):
@@ -1817,6 +1844,85 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 top_png = generate_telegram_chart_png(results[0]["df"], results[0]["fc"], results[0]["symbol"], tf, include_futures_levels=False)
             ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=top_png, title=title_s, symbol="RAPOR")
             send_telegram_message(bot_token, chat_id, f"🐦 <b>X Paylaşım Sonucu:</b>\n{msg_x}")
+
+        elif cmd in ("/avci", "/hunter", "/tara80"):
+            tf = "1h"
+            only_unlisted = False
+            for arg in parts[1:]:
+                a_low = arg.lower()
+                if a_low in ("1h", "4h"):
+                    tf = a_low
+                elif a_low in ("yeni", "kesif", "keşif", "new"):
+                    only_unlisted = True
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🐋 <b>[{tf.upper()}]</b> Borsadaki en likit 80 USDT tahtasının gerçek Spot Taker nakit girişleri, Z-Skorları ve sıkışma enerjileri taranıyor...",
+            )
+            wl = _load_shared_watchlist()
+            rep = MarketWideHunter.scan_market(
+                timeframe=tf,
+                universe_size=80,
+                min_quote_vol_usd=2_500_000.0,
+                top_n=10,
+                watchlist=wl,
+            )
+            html_h = format_market_hunter_telegram_html(rep, only_unlisted=only_unlisted)
+            kb_h = build_market_hunter_inline_keyboard(rep, only_unlisted=only_unlisted)
+            send_telegram_message(bot_token, chat_id, html_h, reply_markup=kb_h)
+
+        elif cmd == "/xavci":
+            tf = parts[1].lower() if (len(parts) >= 2 and parts[1].lower() in ("1h", "4h")) else "1h"
+            send_telegram_message(bot_token, chat_id, f"🐦 <b>[{tf.upper()}]</b> Top 80 Piyasa Avcısı raporu hazırlanıp X'te paylaşılıyor...")
+            wl = _load_shared_watchlist()
+            rep = MarketWideHunter.scan_market(timeframe=tf, universe_size=80, watchlist=wl)
+            tweets = format_market_hunter_x_post(rep)
+            top_png = None
+            if rep.top_picks:
+                try:
+                    top_sym = rep.top_picks[0].symbol
+                    df_top, fc_top, _, _, _ = _compute_full_coin_bundle(top_sym, tf)
+                    top_png = generate_telegram_chart_png(df_top, fc_top, top_sym, tf.upper(), include_futures_levels=False)
+                except Exception:
+                    top_png = None
+            ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=top_png, title=f"Top 80 Piyasa Avcısı ({tf.upper()})", symbol="AVCI")
+            if ok_x:
+                send_telegram_message(bot_token, chat_id, f"🐦 <b>X Paylaşım Sonucu:</b>\n{msg_x}")
+            else:
+                intent_u = build_x_intent_url(tweets[0])
+                kb_x_free = {"inline_keyboard": [[{"text": "🐦 Piyasa Avcısı Raporunu X'te Aç & Paylaş", "url": intent_u}]]}
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    f"🐦 <b>Ücretsiz X Piyasa Avcısı Paketi:</b>\n\n<pre>{tweets[0]}</pre>",
+                    reply_markup=kb_x_free,
+                )
+
+        elif cmd in ("/karne", "/performans", "/ledger"):
+            # Refresh open signals against current watchlist before showing scorecard
+            try:
+                _scan_watchlist_parallel("4h", only_high_quality=False)
+            except Exception:
+                pass
+            sc = SignalLedger().get_scorecard(days=30)
+            html_sc = format_ledger_telegram_html(sc)
+            send_telegram_message(bot_token, chat_id, html_sc)
+
+        elif cmd == "/xkarne":
+            sc = SignalLedger().get_scorecard(days=30)
+            tweets = format_ledger_scorecard_x_post(sc)
+            ok_x, msg_x, _ = publish_x_content(tweets, photo_bytes=None, title="Canlı Sinyal Karnesi (30G)", symbol="KARNE")
+            if ok_x:
+                send_telegram_message(bot_token, chat_id, f"🐦 <b>X Paylaşım Sonucu:</b>\n{msg_x}")
+            else:
+                intent_u = build_x_intent_url(tweets[0])
+                kb_x_free = {"inline_keyboard": [[{"text": "🐦 Sinyal Karnesini X Uygulamasında Aç & Paylaş", "url": intent_u}]]}
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    f"🐦 <b>Ücretsiz X Sinyal Karnesi Paketi:</b>\n\n<pre>{tweets[0]}</pre>",
+                    reply_markup=kb_x_free,
+                )
 
         elif not cmd.startswith("/") and 2 <= len(parts[0]) <= 12:
             sym = _normalize_symbol(parts[0])

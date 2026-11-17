@@ -30,6 +30,7 @@ import src.pipeline
 import src.visualizer
 import src.telegram_notifier
 import src.x_publisher
+import src.local_ai
 
 # Hot-reload submodules automatically if an older module is still cached in a running Streamlit process
 if (
@@ -45,12 +46,15 @@ if (
     or not hasattr(src.signals.MarketForecast, "sr_breakout_guide_tr")
     or not hasattr(src.signals.MarketForecast, "plain_guidance_tr")
     or not hasattr(src.signals.MarketForecast, "contradiction_veto_tr")
+    or not hasattr(src.signals.MarketForecast, "ai_report")
     or not hasattr(src.x_publisher, "publish_x_content")
     or not hasattr(src.x_publisher, "format_ledger_scorecard_x_post")
     or not hasattr(src.x_publisher, "format_market_hunter_x_post")
     or not hasattr(src.pipeline, "AnalysisPipeline")
+    or not hasattr(src.pipeline.AnalysisPipeline, "attach_ai_summary")
     or not hasattr(src.signal_ledger, "SignalLedger")
     or not hasattr(src.market_scanner, "MarketWideHunter")
+    or not hasattr(src.local_ai, "generate_ai_executive_summary")
 ):
     for _mod in (
         src.config,
@@ -60,6 +64,7 @@ if (
         src.patterns,
         src.smart_money,
         src.signals,
+        src.local_ai,
         src.signal_ledger,
         src.pipeline,
         src.visualizer,
@@ -84,6 +89,13 @@ from src.market_scanner import (
 )
 from src.patterns import CandlestickPatternDetector, PATTERN_INFO_TR
 from src.pipeline import AnalysisPipeline
+from src.local_ai import (
+    DEFAULT_OLLAMA_MODEL,
+    build_ai_summary_inline_keyboard,
+    check_ollama_status,
+    format_ai_summary_telegram_html,
+    generate_ai_executive_summary,
+)
 from src.signal_ledger import SignalLedger, format_ledger_telegram_html
 from src.signals import MarketForecast, SignalEngine
 from src.telegram_notifier import (
@@ -505,6 +517,27 @@ with st.sidebar:
         value=1.0,
         step=0.25,
     )
+
+    st.markdown("---")
+    st.markdown("### 🧠 Lokal Yapay Zeka (Ollama)")
+    ollama_online, ollama_models, resolved_ollama_model = check_ollama_status()
+    enable_local_ai_chk = st.checkbox(
+        "🧠 Analiz Raporlarında AI Yönetici Özeti & Çelişki Yorumu Göster",
+        value=True,
+        help="Seçili coin ve zaman dilimi için lokal Ollama modelini kullanarak Sıfır-Halüsinasyonlu Yönetici Özeti ve Çelişki Yorumu üretir.",
+    )
+    if ollama_online:
+        model_opts = ollama_models if ollama_models else [resolved_ollama_model]
+        sel_idx = model_opts.index(resolved_ollama_model) if resolved_ollama_model in model_opts else 0
+        selected_ollama_model = st.selectbox(
+            "Aktif Lokal Ollama Modeli",
+            options=model_opts,
+            index=sel_idx,
+        )
+        st.caption(f"🟢 **Ollama Durumu:** Aktif (`{selected_ollama_model}` — %100 Lokal & Ücretsiz)")
+    else:
+        selected_ollama_model = DEFAULT_OLLAMA_MODEL
+        st.caption("⚪ **Ollama Durumu:** Kapalı (Otomatik Deterministik Yedek Özet kullanılır)")
 
     st.markdown("---")
     st.markdown("### 📲 Mobil & Telegram Bildirim Merkezi")
@@ -1540,6 +1573,89 @@ if plain_guide_act:
         """,
         unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# 1b. LOCAL OLLAMA AI EXECUTIVE SUMMARY & CONTRADICTION AUDITOR
+# ---------------------------------------------------------------------------
+if enable_local_ai_chk:
+    force_ai_key = f"force_ai_refresh_{active_symbol}_{active_tf}"
+    force_ai_now = bool(st.session_state.pop(force_ai_key, False))
+    mtf_scores_act = {k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts}
+    with st.spinner(f"🧠 Lokal AI ({selected_ollama_model}) {active_symbol} [{active_tf}] yönetici özeti & çelişki denetimi hazırlıyor..."):
+        ai_rep_active = generate_ai_executive_summary(
+            symbol=active_symbol,
+            timeframe=active_tf,
+            current_price=last_price,
+            fc=fc_active,
+            mtf_scores=mtf_scores_act,
+            order_flow=order_flow,
+            model=selected_ollama_model,
+            force_refresh=force_ai_now,
+        )
+        fc_active.ai_report = ai_rep_active
+
+    ai_badge_txt = (
+        f"🤖 Ollama · {ai_rep_active.model_used} "
+        + ("(⚡ Önbellek)" if ai_rep_active.from_cache else f"({ai_rep_active.latency_sec:.1f} sn)")
+        if ai_rep_active.is_ai_generated
+        else "⚙️ Deterministik Yedek Motor (Ollama Kapalı/Zaman Aşımı)"
+    )
+    tensions_html = ""
+    if ai_rep_active.detected_tensions:
+        chips = "".join(
+            [
+                f"<div style='font-size:12px; color:#FCD34D; margin-top:3px;'>• {t_it}</div>"
+                for t_it in ai_rep_active.detected_tensions[:3]
+            ]
+        )
+        tensions_html = (
+            "<div style='margin-top:8px; padding-top:7px; border-top:1px dashed #334155;'>"
+            "<b style='font-size:12px; color:#F59E0B;'>🔎 Tespit Edilen Katmanlar Arası Uyarılar:</b>"
+            f"{chips}</div>"
+        )
+
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(95deg, rgba(17, 24, 39, 0.98) 0%, rgba(15, 23, 42, 0.95) 100%); border:1px solid #334155; border-left:5px solid {ai_rep_active.accent_color}; border-radius:10px; padding:14px 18px; margin-bottom:10px; box-shadow:0 4px 14px rgba(0,0,0,0.38);">
+            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+                <span style="font-size:14.5px; font-weight:800; color:#C084FC;">
+                    🧠 LOKAL AI YÖNETİCİ ÖZETİ &amp; ÇELİŞKİ YORUMU ({active_symbol} · {active_tf})
+                </span>
+                <span style="font-size:12px; font-weight:700; color:{ai_rep_active.accent_color}; background:#0B0F19; border:1px solid {ai_rep_active.accent_color}; border-radius:16px; padding:3px 10px;">
+                    {ai_rep_active.stance_tr} &nbsp;|&nbsp; <span style="color:#94A3B8; font-weight:500;">{ai_badge_txt}</span>
+                </span>
+            </div>
+            <div style="font-size:13.4px; color:#E2E8F0; line-height:1.58; margin-bottom:6px;">
+                <b style="color:#38BDF8;">📌 Yönetici Özeti:</b> {ai_rep_active.executive_summary_tr}
+            </div>
+            <div style="font-size:13.4px; color:#FDE68A; line-height:1.58; margin-bottom:6px;">
+                <b style="color:#F59E0B;">⚖️ Çelişki &amp; Tuzak Yorumu:</b> {ai_rep_active.contradiction_comment_tr}
+            </div>
+            <div style="font-size:13px; color:#93C5FD; line-height:1.55;">
+                <b style="color:#60A5FA;">🎯 Koşullu İzleme Planı:</b> {ai_rep_active.action_plan_tr}
+            </div>
+            {tensions_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    ai_b1, ai_b2, _ = st.columns([1.2, 1.5, 3.3])
+    with ai_b1:
+        if st.button("🔄 AI Yorumunu Yenile", key=f"btn_ai_ref_{active_symbol}_{active_tf}", use_container_width=True):
+            st.session_state[force_ai_key] = True
+            st.rerun()
+    with ai_b2:
+        if st.button("📲 AI Özetini Telegram'a Gönder", key=f"btn_ai_tg_{active_symbol}_{active_tf}", use_container_width=True):
+            ok_aitg, msg_aitg = send_telegram_message(
+                tg_token_input,
+                tg_chat_input,
+                format_ai_summary_telegram_html(ai_rep_active, current_price=last_price),
+                reply_markup=build_ai_summary_inline_keyboard(active_symbol, active_tf),
+            )
+            if ok_aitg:
+                st.success(msg_aitg)
+            else:
+                st.warning(msg_aitg)
 
 # ---------------------------------------------------------------------------
 # 2. 4 CONCISE, READABLE & JARGON-FREE CARDS (TREND, S/R, MONEY FLOW, MAGNETS)

@@ -15,8 +15,11 @@ Bu proje; kripto para piyasalarında **Trend Yönü**, **Destek/Direnç Kırıl�
   - **7 Katmanlı Vadeli Denetim:** Trend, Üst Zaman Uyumu, Destek/Direnç Mesafesi (Room-to-Run), R:R Oranı, Vadeli OI/Fonlama/Taker CVD, SMC (`BOS`/`CHoCH`/`SWEEP`/Order Block) ve Testere Filtresi (`CHOP`).
   - **Güven Notu (`0–100` | `A+`, `A`, `B`, `C`, `D`):** Sadece güven notu `>= 62` ve `R:R >= 1.35` olan düşük riskli yapılarda **Yön (`LONG`/`SHORT`), Giriş Yeri, TP1/TP2/TP3, İğne Korumalı Stop Yeri ve Maks. İzole Kaldıraç** verir.
   - **Risk Kalkanı:** Teknik yapı uygun değilse veya risk yüksekse işlem önermez (`⛔ İŞLEM TAVSİYE EDİLMEZ`), giriş/hedef/stop gizlenir ve neden girilmemesi gerektiğini açıklar.
-- **🤖 7/24 İnteraktif Telegram Botu (`telegram_bot.py`):**
-  - Dokunmatik alt menü ve satır içi (inline) butonlar (`15M`, `1H`, `4H`, `1D` anlık geçiş, grafik fotoğrafı gönderimi, Vadeli İşlem Radarı, kasa hesaplayıcı ve fiyat alarmları).
+- **🧠 Lokal Yapay Zeka (Ollama) Yönetici Özeti & Çelişki Denetçisi (`src/local_ai.py`):**
+  - Sıfır-halüsinasyonlu hibrit mimariyle lokal `Ollama` (`qwen2.5:3b` vb.) modeline bağlanır; tüm sayısal seviyeleri Python hesaplar, AI ise çoklu zaman dilimi, Spot/Vadeli CVD ve destek/direnç çelişkilerini denetleyip Türkçe **Yönetici Özeti, Tuzak Yorumu ve Koşullu İzleme Planı** üretir (Ollama kapalıysa otomatik deterministik yedek özet çalışır).
+- **🐋 Top 80 Likit Coin Balina Girişi & Sıkışma Avcısı (`src/market_scanner.py`)** ve **📊 SQLite Canlı Sinyal Öz-Doğrulama Defteri (`src/signal_ledger.py`)**.
+- **🤖 7/24 İnteraktif Telegram Botu (`telegram_bot.py`) & 🐦 X Otomatik Paylaşım (`src/x_publisher.py`):**
+  - Dokunmatik alt menü ve satır içi (inline) butonlar (`15M`, `1H`, `4H`, `1D` anlık geçiş, `🧠 AI Özeti` / `/ai`, grafik fotoğrafı gönderimi, Vadeli İşlem Radarı, kasa hesaplayıcı ve fiyat alarmları).
 
 ---
 
@@ -47,5 +50,5 @@ docker compose up -d --build
 - `app.py` — Streamlit Web Arayüzü ve Vadeli İşlemler Radarı
 - `telegram_bot.py` — 7/24 İnteraktif Telegram Botu & Proaktif Kırılım/Fiyat Alarm Motoru
 - `main.py` — Komut satırı (CLI) analiz aracı
-- `src/` — Çekirdek analiz motoru (`data_fetcher.py`, `indicators.py`, `patterns.py`, `smart_money.py`, `signals.py`, `telegram_notifier.py`, `visualizer.py`)
+- `src/` — Çekirdek analiz motoru (`pipeline.py`, `local_ai.py`, `market_scanner.py`, `signal_ledger.py`, `data_fetcher.py`, `indicators.py`, `patterns.py`, `smart_money.py`, `signals.py`, `telegram_notifier.py`, `x_publisher.py`, `visualizer.py`)
 - `tests/` — Birim testleri (`python -m unittest discover -s tests -v`)

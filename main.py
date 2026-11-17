@@ -93,6 +93,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Oluşturulan raporları varsayılan web tarayıcısında otomatik aç",
     )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Lokal Ollama AI Yönetici Özeti & Çelişki Yorumu katmanını devre dışı bırak",
+    )
     return parser.parse_args()
 
 
@@ -105,6 +110,7 @@ def analyze_coin_multi_timeframe(
     btc_regime_scores: Optional[Dict[str, float]] = None,
     btc_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
     show: bool = False,
+    enable_ai: bool = True,
 ) -> Tuple[Path, Dict[str, float], Dict[str, pd.DataFrame]]:
     base_config = AnalysisConfig(
         exchange=ExchangeConfig(
@@ -134,12 +140,22 @@ def analyze_coin_multi_timeframe(
     source_used = bundle.source_used
     coin_scores = bundle.mtf_scores
     ordered_tfs = [tf.upper() for tf in timeframes]
+    anchor_ai_tf = "4H" if "4H" in ordered_tfs else ordered_tfs[0]
+    ai_rep = None
+    if enable_ai:
+        ai_rep = AnalysisPipeline.attach_ai_summary(bundle, timeframe=anchor_ai_tf)
 
     print("\n" + "=" * 106)
     print(f"  📊 {symbol} — KURUMSAL ÇOK KATMANLI YÖN, SMC, OLASILIK KONİSİ & GERÇEKÇİ BACKTEST RAPORU (v3.0)")
     print("=" * 106)
     print(f"  📘 Derin Emir Defteri : {order_flow.orderbook_status_tr}")
     print(f"  ⚡ Vadeli İşlemler    : {order_flow.futures_sentiment_tr}")
+    if ai_rep is not None:
+        ai_src_tag = f"Ollama/{ai_rep.model_used} ({ai_rep.latency_sec:.1f}s)" if ai_rep.is_ai_generated else "Deterministik Yedek"
+        print(f"  🧠 AI Karar Duruşu    : {ai_rep.stance_tr} [{anchor_ai_tf} · {ai_src_tag}]")
+        print(f"  📌 AI Yönetici Özeti  : {ai_rep.executive_summary_tr}")
+        print(f"  ⚖️ AI Çelişki Yorumu  : {ai_rep.contradiction_comment_tr}")
+        print(f"  🎯 AI İzleme Planı    : {ai_rep.action_plan_tr}")
     print("-" * 106)
 
     for tf_key in ordered_tfs:
@@ -218,6 +234,7 @@ def run_pipeline(args: argparse.Namespace) -> List[Path]:
             btc_regime_scores=None,
             btc_tf_data=None,
             show=args.show,
+            enable_ai=not args.no_ai,
         )
         saved_files.append(btc_path)
 
@@ -235,6 +252,7 @@ def run_pipeline(args: argparse.Namespace) -> List[Path]:
             btc_regime_scores=btc_regime_scores,
             btc_tf_data=btc_tf_data,
             show=args.show,
+            enable_ai=not args.no_ai,
         )
         saved_files.append(path)
 

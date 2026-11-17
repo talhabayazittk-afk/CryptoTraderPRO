@@ -1559,6 +1559,37 @@ class InteractiveChartVisualizer:
             </div>
             """
 
+        ai_banner_html = ""
+        for _tf_k in ("4H", "1H", "1D", "15M"):
+            _fc_ai = tf_forecasts.get(_tf_k)
+            _rep_ai = getattr(_fc_ai, "ai_report", None) if _fc_ai is not None else None
+            if _rep_ai is not None:
+                _ai_badge = (
+                    f"Ollama · {_rep_ai.model_used} ({_rep_ai.latency_sec:.1f}s)"
+                    if _rep_ai.is_ai_generated
+                    else "Deterministik Yedek Motor"
+                )
+                ai_banner_html = f"""
+                <div style="background:linear-gradient(95deg, #111827 0%, #0F172A 100%); border:1px solid #334155; border-left:5px solid {_rep_ai.accent_color}; border-radius:10px; padding:14px 18px; margin-bottom:16px; box-shadow:0 4px 14px rgba(0,0,0,0.4);">
+                    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+                        <span style="font-size:14.5px; font-weight:800; color:#C084FC;">🧠 LOKAL AI YÖNETİCİ ÖZETİ &amp; ÇELİŞKİ DENETİMİ ({_rep_ai.timeframe})</span>
+                        <span style="font-size:12px; font-weight:700; color:{_rep_ai.accent_color}; background:rgba(15,23,42,0.9); border:1px solid {_rep_ai.accent_color}; border-radius:16px; padding:3px 10px;">
+                            {_rep_ai.stance_tr} &nbsp;|&nbsp; <span style="color:#94A3B8; font-weight:500;">{_ai_badge}</span>
+                        </span>
+                    </div>
+                    <div style="font-size:13px; color:#E2E8F0; line-height:1.58; margin-bottom:6px;">
+                        <b>📌 Yönetici Özeti:</b> {_rep_ai.executive_summary_tr}
+                    </div>
+                    <div style="font-size:13px; color:#FDE68A; line-height:1.58; margin-bottom:6px;">
+                        <b>⚖️ Çelişki &amp; Tuzak Yorumu:</b> {_rep_ai.contradiction_comment_tr}
+                    </div>
+                    <div style="font-size:12.8px; color:#93C5FD; line-height:1.55;">
+                        <b>🎯 Koşullu İzleme Planı:</b> {_rep_ai.action_plan_tr}
+                    </div>
+                </div>
+                """
+                break
+
         return f"""
         <div style="font-family:'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background:#0B0F19; color:#F8FAFC; padding:20px 28px 10px 28px;">
             <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; border-bottom:1px solid #1E293B; padding-bottom:12px; margin-bottom:14px;">
@@ -1573,6 +1604,7 @@ class InteractiveChartVisualizer:
             </div>
 
             {order_flow_html}
+            {ai_banner_html}
 
             <div style="display:flex; flex-wrap:wrap; gap:16px; margin-bottom:16px;">
                 {tf_cards_html}

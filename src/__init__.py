@@ -24,6 +24,12 @@ from .smart_money import (
     RiskPositionPlan,
 )
 from .visualizer import InteractiveChartVisualizer
+from .local_ai import (
+    AIExecutiveReport,
+    check_ollama_status,
+    detect_analytical_contradictions,
+    generate_ai_executive_summary,
+)
 
 __all__ = [
     "AnalysisConfig",
@@ -51,4 +57,8 @@ __all__ = [
     "RelativeStrengthMetrics",
     "RiskPositionPlan",
     "InteractiveChartVisualizer",
+    "AIExecutiveReport",
+    "check_ollama_status",
+    "detect_analytical_contradictions",
+    "generate_ai_executive_summary",
 ]

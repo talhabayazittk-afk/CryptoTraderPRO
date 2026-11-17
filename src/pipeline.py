@@ -6,7 +6,7 @@ while automatically auditing & logging live setups in `SignalLedger` (`signal_le
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 
@@ -167,3 +167,35 @@ class AnalysisPipeline:
             mtf_scores=mtf_scores,
             current_price=curr_p,
         )
+
+    @staticmethod
+    def attach_ai_summary(
+        bundle: CoinAnalysisBundle,
+        timeframe: str = "4H",
+        model: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Any:
+        """
+        Generates (or fetches from cache) a Local AI Executive Summary & Contradiction Audit
+        for `bundle.tf_forecasts[timeframe]` and attaches it to `fc.ai_report`.
+        """
+        from .local_ai import DEFAULT_OLLAMA_MODEL, generate_ai_executive_summary
+
+        tf_up = timeframe.upper()
+        if tf_up not in bundle.tf_forecasts:
+            tf_up = next(iter(bundle.tf_forecasts.keys()))
+        fc = bundle.tf_forecasts[tf_up]
+        df_tf = bundle.tf_data.get(tf_up)
+        curr_p = float(df_tf["close"].iloc[-1]) if df_tf is not None and len(df_tf) > 0 else bundle.current_price
+        rep = generate_ai_executive_summary(
+            symbol=bundle.symbol,
+            timeframe=tf_up,
+            current_price=curr_p,
+            fc=fc,
+            mtf_scores=bundle.mtf_scores,
+            order_flow=bundle.order_flow,
+            model=model or DEFAULT_OLLAMA_MODEL,
+            force_refresh=force_refresh,
+        )
+        fc.ai_report = rep
+        return rep

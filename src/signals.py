@@ -8,7 +8,7 @@ Features:
     5. Historical Signal Backtest Validator (Win-Rate %, Avg MFE/MAE over next 5 bars)
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -272,6 +272,7 @@ class MarketForecast:
     aggregated_oi_usd: Optional[float] = None
     oi_weighted_funding_pct: Optional[float] = None
     contradiction_veto_tr: str = ""
+    ai_report: Optional[Any] = None
 
 
 class SignalEngine:

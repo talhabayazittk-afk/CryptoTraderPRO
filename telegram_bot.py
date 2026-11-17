@@ -44,6 +44,11 @@ from src.market_scanner import (
     build_market_hunter_inline_keyboard,
     format_market_hunter_telegram_html,
 )
+from src.local_ai import (
+    build_ai_summary_inline_keyboard,
+    format_ai_summary_telegram_html,
+    generate_ai_executive_summary,
+)
 from src.patterns import CandlestickPatternDetector
 from src.pipeline import AnalysisPipeline
 from src.signal_ledger import SignalLedger, format_ledger_telegram_html
@@ -1442,6 +1447,39 @@ def _handle_callback_query(bot_token: str, cq: Dict[str, Any]) -> None:
                 reply_markup=kb_x_free,
             )
 
+    elif action in ("ai_sum", "ai_ref") and len(parts) >= 2:
+        sym = _normalize_symbol(parts[1])
+        tf = parts[2] if len(parts) >= 3 else "4H"
+        is_ref = action == "ai_ref"
+        answer_callback_query(
+            bot_token,
+            cq_id,
+            f"🧠 {sym} ({tf.upper()}) Lokal AI Yönetici & Çelişki Yorumu hazırlanıyor...",
+        )
+        if not is_photo_msg and msg_id:
+            edit_telegram_message(
+                bot_token,
+                chat_id,
+                msg_id,
+                f"🧠 <b>{sym} [{tf.upper()}]</b> için Lokal Yapay Zeka (Ollama) yönetici özeti ve çelişki denetimi üretiliyor...",
+            )
+        _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf.lower(), force_refresh=is_ref)
+        rep_ai = generate_ai_executive_summary(
+            symbol=sym,
+            timeframe=tf.upper(),
+            current_price=curr_p,
+            fc=fc_act,
+            mtf_scores=mtf_sc,
+            force_refresh=is_ref,
+        )
+        html_ai = format_ai_summary_telegram_html(rep_ai, current_price=curr_p)
+        kb_ai = build_ai_summary_inline_keyboard(sym, tf.upper())
+        if not is_photo_msg and msg_id:
+            if not edit_telegram_message(bot_token, chat_id, msg_id, html_ai, reply_markup=kb_ai):
+                send_telegram_message(bot_token, chat_id, html_ai, reply_markup=kb_ai)
+        else:
+            send_telegram_message(bot_token, chat_id, html_ai, reply_markup=kb_ai)
+
     else:
         answer_callback_query(bot_token, cq_id, "✅ İşlem alındı.")
 
@@ -1497,6 +1535,29 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 chat_id,
                 "👇 <b>Hızlı Başlangıç (Varsayılan: 4H):</b> Analiz etmek istediğiniz coine dokunun:",
                 reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
+            )
+
+        elif cmd in ("/ai", "/aiyorum", "/ozet"):
+            sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "BTC/USDT"
+            tf = parts[2].lower() if (len(parts) >= 3 and parts[2].lower() in ("15m", "1h", "4h", "1d")) else "4h"
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                f"🧠 <b>{sym} [{tf.upper()}]</b> için Lokal AI Yönetici Özeti &amp; Çelişki Yorumu hazırlanıyor...",
+            )
+            _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
+            rep_ai = generate_ai_executive_summary(
+                symbol=sym,
+                timeframe=tf.upper(),
+                current_price=curr_p,
+                fc=fc_act,
+                mtf_scores=mtf_sc,
+            )
+            send_telegram_message(
+                bot_token,
+                chat_id,
+                format_ai_summary_telegram_html(rep_ai, current_price=curr_p),
+                reply_markup=build_ai_summary_inline_keyboard(sym, tf.upper()),
             )
 
         elif cmd == "/analiz":

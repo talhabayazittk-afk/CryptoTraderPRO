@@ -398,8 +398,9 @@ def build_analysis_inline_keyboard(
         "inline_keyboard": [
             tf_row,
             [
-                {"text": "⚡ Vadeli İşlem (Long/Short) Planı", "callback_data": f"fut:{sym_up}:{tf_up}"},
+                {"text": "⚡ Vadeli Plan", "callback_data": f"fut:{sym_up}:{tf_up}"},
                 {"text": "🚨 Kırılım Radarı", "callback_data": f"brk_scan:{tf_up}"},
+                {"text": "🧠 AI Özeti", "callback_data": f"ai_sum:{sym_up}:{tf_up}"},
             ],
             [
                 {"text": "🖼️ Grafik Gönder", "callback_data": f"chart:{sym_up}:{tf_up}"},
@@ -441,6 +442,7 @@ def build_futures_setup_inline_keyboard(symbol: str, active_tf: str = "4H") -> D
                 {"text": "📊 Genel Analiz", "callback_data": f"an:{symbol}:{tf_up}"},
                 {"text": "🖼️ Vadeli Grafik", "callback_data": f"fut_chart:{symbol}:{tf_up}"},
                 {"text": "🧮 Kasa Planı", "callback_data": f"kasa:{symbol}:{tf_up}"},
+                {"text": "🧠 AI Özeti", "callback_data": f"ai_sum:{symbol}:{tf_up}"},
             ],
             [
                 {"text": "🔔 Direnç Alarmı (+)", "callback_data": f"al_res:{symbol}:{tf_up}"},

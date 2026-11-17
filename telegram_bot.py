@@ -566,6 +566,8 @@ def _build_help_html(chat_id: str) -> str:
         "👋 <b>Akıllı Kripto Karar-Destek &amp; Kırılım Radarı Terminali (Varsayılan: 4H)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Artık yazı yazmanıza gerek kalmadan <b>ekranın altındaki sabit menüyü</b> veya mesajların altındaki <b>dokunmatik butonları</b> kullanabilirsiniz!\n\n"
+        "🧠 <b>Lokal AI Yönetici Özeti &amp; Çelişki Yorumu (%100 Ücretsiz · Ollama):</b>\n"
+        "• <code>/ai BTC 4h</code> veya <code>ai ONDO</code> — Çoklu zaman dilimi, para akışı ve tuzak çelişkilerini denetleyen AI Yönetici Özeti (Analiz kartlarındaki <b>🧠 AI Özeti</b> butonuyla da açılır)\n\n"
         "🚨 <b>Destek / Direnç Kırılım &amp; Tuzak (SFP) Radarı:</b>\n"
         "• <code>/kirilim 4h</code> — <b>Direnç Kırılımı Geldi</b>, <b>Destek Kırılımı Geldi</b>, <b>Sahte Kırılım (Tuzak)</b> ve <b>Retest</b> onaylarını listeler\n\n"
         "🐋 <b>Tüm Piyasa Spot Nakit Girişi &amp; Sıkışma Avcısı (Top 80):</b>\n"
@@ -1493,6 +1495,8 @@ def _map_reply_keyboard_text(raw_text: str) -> str:
     t_low = t.lower()
     if "coin seç" in t_low or "coin listesi" in t_low or t.startswith("🪙"):
         return "/liste"
+    if "ai yönetici" in t_low or "ai özet" in t_low or t.startswith("🧠"):
+        return "/ai"
     if "avcı" in t_low or "avci" in t_low or "top 80" in t_low or t.startswith("🐋"):
         return "/avci 1h"
     if "sinyal karnesi" in t_low or t.startswith("📊"):
@@ -1511,6 +1515,16 @@ def _map_reply_keyboard_text(raw_text: str) -> str:
         return "/alarmlar"
     if "komutlar" in t_low or "yardım" in t_low or "yardim" in t_low or t.startswith("📋"):
         return "/yardim"
+    # Support natural slashless AI requests like: "ai BTC", "ai analiz ONDO 1h", "BTC ai", "ONDO ai analiz"
+    tokens = t.split()
+    low_tokens = [tok.lower() for tok in tokens]
+    if low_tokens and low_tokens[0] in ("ai", "yapayzeka", "ozet", "özet"):
+        rest = [tok for tok in tokens[1:] if tok.lower() not in ("analiz", "analizi", "yorum", "yorumu", "özet", "ozet")]
+        return ("/ai " + " ".join(rest)).strip()
+    if len(low_tokens) >= 2 and ("ai" in low_tokens[1:] or "yapay" in low_tokens[1:]):
+        coin_tok = tokens[0]
+        tf_tok = next((tok for tok in low_tokens[1:] if tok in ("15m", "1h", "4h", "1d")), "4h")
+        return f"/ai {coin_tok} {tf_tok}"
     return t
 
 
@@ -1537,28 +1551,47 @@ def _handle_message_command(bot_token: str, chat_id: str, raw_text: str) -> None
                 reply_markup=build_coin_list_inline_keyboard(wl, "4H"),
             )
 
-        elif cmd in ("/ai", "/aiyorum", "/ozet"):
-            sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "BTC/USDT"
-            tf = parts[2].lower() if (len(parts) >= 3 and parts[2].lower() in ("15m", "1h", "4h", "1d")) else "4h"
-            send_telegram_message(
-                bot_token,
-                chat_id,
-                f"🧠 <b>{sym} [{tf.upper()}]</b> için Lokal AI Yönetici Özeti &amp; Çelişki Yorumu hazırlanıyor...",
-            )
-            _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
-            rep_ai = generate_ai_executive_summary(
-                symbol=sym,
-                timeframe=tf.upper(),
-                current_price=curr_p,
-                fc=fc_act,
-                mtf_scores=mtf_sc,
-            )
-            send_telegram_message(
-                bot_token,
-                chat_id,
-                format_ai_summary_telegram_html(rep_ai, current_price=curr_p),
-                reply_markup=build_ai_summary_inline_keyboard(sym, tf.upper()),
-            )
+        elif cmd in ("/ai", "/aiyorum", "/ozet", "ai"):
+            if len(parts) < 2:
+                wl = _load_shared_watchlist()
+                ai_rows: List[List[Dict[str, str]]] = []
+                row_buf: List[Dict[str, str]] = []
+                for sym_w in wl[:12]:
+                    row_buf.append({"text": f"🧠 {sym_w.split('/')[0]}", "callback_data": f"ai_sum:{sym_w}:4H"})
+                    if len(row_buf) == 3:
+                        ai_rows.append(row_buf)
+                        row_buf = []
+                if row_buf:
+                    ai_rows.append(row_buf)
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    "🧠 <b>LOKAL AI YÖNETİCİ ÖZETİ &amp; ÇELİŞKİ DENETİMİ (4H)</b>\n"
+                    "<i>AI yorumunu görmek istediğiniz coine dokunun veya doğrudan <code>/ai BTC 4h</code> / <code>ai ONDO</code> yazın:</i>",
+                    reply_markup={"inline_keyboard": ai_rows},
+                )
+            else:
+                sym = _normalize_symbol(parts[1])
+                tf = parts[2].lower() if (len(parts) >= 3 and parts[2].lower() in ("15m", "1h", "4h", "1d")) else "4h"
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    f"🧠 <b>{sym} [{tf.upper()}]</b> için Lokal AI Yönetici Özeti &amp; Çelişki Yorumu hazırlanıyor...",
+                )
+                _, fc_act, _, mtf_sc, curr_p = _compute_full_coin_bundle(sym, tf)
+                rep_ai = generate_ai_executive_summary(
+                    symbol=sym,
+                    timeframe=tf.upper(),
+                    current_price=curr_p,
+                    fc=fc_act,
+                    mtf_scores=mtf_sc,
+                )
+                send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    format_ai_summary_telegram_html(rep_ai, current_price=curr_p),
+                    reply_markup=build_ai_summary_inline_keyboard(sym, tf.upper()),
+                )
 
         elif cmd == "/analiz":
             sym = _normalize_symbol(parts[1]) if len(parts) >= 2 else "ONDO/USDT"

@@ -141,21 +141,25 @@ def analyze_coin_multi_timeframe(
     coin_scores = bundle.mtf_scores
     ordered_tfs = [tf.upper() for tf in timeframes]
     anchor_ai_tf = "4H" if "4H" in ordered_tfs else ordered_tfs[0]
-    ai_rep = None
-    if enable_ai:
-        ai_rep = AnalysisPipeline.attach_ai_summary(bundle, timeframe=anchor_ai_tf)
+    ai_rep = AnalysisPipeline.attach_ai_summary(bundle, timeframe=anchor_ai_tf, enable_ai=enable_ai)
 
     print("\n" + "=" * 106)
-    print(f"  📊 {symbol} — KURUMSAL ÇOK KATMANLI YÖN, SMC, OLASILIK KONİSİ & GERÇEKÇİ BACKTEST RAPORU (v3.0)")
+    print(f"  📊 {symbol} — KURUMSAL ÇOK KATMANLI YÖN, PARA SAĞLIĞI, SMC & GERÇEKÇİ BACKTEST RAPORU (v10.0)")
     print("=" * 106)
     print(f"  📘 Derin Emir Defteri : {order_flow.orderbook_status_tr}")
     print(f"  ⚡ Vadeli İşlemler    : {order_flow.futures_sentiment_tr}")
     if ai_rep is not None:
-        ai_src_tag = f"Ollama/{ai_rep.model_used} ({ai_rep.latency_sec:.1f}s)" if ai_rep.is_ai_generated else "Deterministik Yedek"
-        print(f"  🧠 AI Karar Duruşu    : {ai_rep.stance_tr} [{anchor_ai_tf} · {ai_src_tag}]")
-        print(f"  📌 AI Yönetici Özeti  : {ai_rep.executive_summary_tr}")
-        print(f"  ⚖️ AI Çelişki Yorumu  : {ai_rep.contradiction_comment_tr}")
-        print(f"  🎯 AI İzleme Planı    : {ai_rep.action_plan_tr}")
+        ai_src_tag = (
+            f"Hibrit: Kantitatif + Ollama/{ai_rep.model_used} ({ai_rep.latency_sec:.1f}s | Katkı:{ai_rep.ai_score_delta:+.1f}p)"
+            if ai_rep.is_ai_generated
+            else "Bağımsız Kantitatif Motor v10 (AI Olmadan Tam Kapasite)"
+        )
+        print(f"  🧠 Aktif Yön Motoru   : {ai_rep.stance_tr} [{anchor_ai_tf} · {ai_src_tag}]")
+        if ai_rep.flow_health_tr:
+            print(f"  💧 Para Giriş Sağlığı : {ai_rep.flow_health_tr}")
+        print(f"  📌 Yönetici & Yön Öz. : {ai_rep.executive_summary_tr}")
+        print(f"  ⚖️ Çelişki Denetimi   : {ai_rep.contradiction_comment_tr}")
+        print(f"  🎯 İzleme Planı       : {ai_rep.action_plan_tr}")
     print("-" * 106)
 
     for tf_key in ordered_tfs:
@@ -224,7 +228,7 @@ def run_pipeline(args: argparse.Namespace) -> List[Path]:
     btc_regime_scores: Dict[str, float] = {}
     btc_tf_data: Dict[str, pd.DataFrame] = {}
     if "BTC/USDT" in symbols:
-        btc_out = args.output if len(symbols) == 1 else build_output_filename("BTC/USDT")
+        btc_out = build_output_filename("BTC/USDT", args.output if len(symbols) == 1 else "")
         btc_path, btc_regime_scores, btc_tf_data = analyze_coin_multi_timeframe(
             symbol="BTC/USDT",
             timeframes=args.timeframes,

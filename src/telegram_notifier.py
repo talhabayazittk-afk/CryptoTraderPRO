@@ -356,6 +356,7 @@ def build_main_reply_keyboard() -> Dict[str, Any]:
                 {"text": "🌍 Piyasa & Nakit Özeti"},
             ],
             [
+                {"text": "🧠 AI Yönetici Özeti"},
                 {"text": "📊 Canlı Sinyal Karnesi"},
                 {"text": "⏰ Alarmlarım & Radar"},
             ],
@@ -822,8 +823,8 @@ def format_forecast_telegram_html(
     guidance_str = getattr(fc, "plain_guidance_tr", "") or (
         f"{sup_str} desteği ile {res_str} direnci arasındaki kırılım yönü belirler (YTD)."
     )
-    if len(guidance_str) > 100:
-        guidance_str = guidance_str[:93].rstrip() + " (YTD)."
+    if len(guidance_str) > 82:
+        guidance_str = guidance_str[:75].rstrip() + " (YTD)."
 
     lines = [
         f"📊 <b>{symbol} ({tf_up}) GENEL &amp; YAPISAL ANALİZ</b> <i>({now_hm})</i>",
@@ -833,6 +834,8 @@ def format_forecast_telegram_html(
     if mtf_line:
         lines.append(mtf_line)
 
+    fh_sc = getattr(fc, "flow_health_score", 0.0)
+    fh_short = f"·💧{fh_sc:+.0f}" if abs(fh_sc) >= 1.0 else ""
     lines.extend(
         [
             "━━━━━━━━━━━━",
@@ -842,7 +845,7 @@ def format_forecast_telegram_html(
             brk_line,
             "━━━━━━━━━━━━",
             "🐋 <b>PARA AKIŞI &amp; MIKNATIS</b>",
-            f"• <b>Nakit:</b> {mf_ic} (<code>{delta_fmt_str}</code>) | <b>Balina:</b> {wh_ic} ({wh_score:.0f}) | 🧲 <b>POC:</b> <code>{poc_str}</code>",
+            f"• <b>Nakit:</b> {mf_ic} (<code>{delta_fmt_str}</code>{fh_short}) | <b>Balina:</b> {wh_ic} ({wh_score:.0f}) | 🧲 <b>POC:</b> <code>{poc_str}</code>",
             f"🧭 <b>SADE YOL HARİTASI (YTD):</b> {guidance_str}",
         ]
     )

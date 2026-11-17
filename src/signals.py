@@ -273,6 +273,13 @@ class MarketForecast:
     oi_weighted_funding_pct: Optional[float] = None
     contradiction_veto_tr: str = ""
     ai_report: Optional[Any] = None
+    # v10.0 Institutional Healthy Money-Flow, Trend Purity & Hybrid Standalone/AI Engine Fields
+    flow_health_score: float = 0.0
+    flow_health_tr: str = "⚖️ Dengeli Likidite Akışı"
+    efficiency_ratio: float = 0.35
+    quant_score_raw: float = 0.0
+    ai_score_adjustment: float = 0.0
+    engine_mode_tr: str = "⚙️ Bağımsız Kantitatif Motor v10 (Tam Kapasite)"
 
 
 class SignalEngine:
@@ -353,22 +360,72 @@ class SignalEngine:
         )
 
         vol_confirmed = (rvol >= 0.85) | out["regime_oversold"] | out["regime_overbought"]
+        adx_s = out.get("adx", pd.Series(20.0, index=out.index)).fillna(20.0)
+        ema20_s = out.get("ema_20", close).fillna(close)
+        ema50_s = out.get("ema_50", close).fillna(close)
+        chop_s = out.get("choppiness_index", pd.Series(50.0, index=out.index)).fillna(50.0)
+        abs_s = out.get("absorption_signal", pd.Series("NONE", index=out.index)).fillna("NONE")
+        fh_s = out.get("flow_health_score", cmf * 150.0).fillna(0.0)
 
-        # 3. High-Conviction Confluence Reversal Signals (strictly on closed candles)
-        strong_bullish_reversal = (
+        # v10.0 Anti-Counter-Trend & Healthy Money-Flow Gate (blocks catching falling knives against trend + outflow)
+        st_dir_s = out.get("supertrend_dir", pd.Series(1, index=out.index)).fillna(1)
+        imp_z_s = out.get("flow_impulse_z", pd.Series(0.0, index=out.index)).fillna(0.0)
+        in_downtrend = (close < ema50_s) & ((close < ema20_s) | (st_dir_s == -1))
+        in_uptrend = (close > ema50_s) & ((close > ema20_s) | (st_dir_s == 1))
+
+        # Counter-trend reversals in an active trend require green/red body confirmation + Smart Money Absorption or strong flow impulse
+        is_green = close >= out["open"]
+        is_red = close <= out["open"]
+        bull_counter_ok = is_green & (
+            (abs_s == "BULL_ABSORPTION")
+            | ((fh_s >= 5.0) & (rvol >= 1.20))
+            | ((imp_z_s >= 0.75) & (rvol >= 1.15))
+            | (morning_star & (cmf >= 0.02))
+        )
+        bear_counter_ok = is_red & (
+            (abs_s == "BEAR_ABSORPTION")
+            | ((fh_s <= -5.0) & (rvol >= 1.20))
+            | ((imp_z_s <= -0.75) & (rvol >= 1.15))
+            | (evening_star & (cmf <= -0.02))
+        )
+
+        # v10.0 Trend + Healthy Money-Flow Continuation Setups (institutional trend-following entries)
+        bull_trend_pullback = (
+            in_uptrend
+            & (low <= ema20_s * 1.010)
+            & (fh_s >= 6.0)
+            & (chop_s < 59.0)
+            & (out["pattern_bullish_engulfing"] | out["pattern_hammer"] | bull_marubozu | tweezer_bot | morning_star)
+            & (rvol >= 0.85)
+        )
+        bear_trend_pullback = (
+            in_downtrend
+            & (high >= ema20_s * 0.990)
+            & (fh_s <= -6.0)
+            & (chop_s < 59.0)
+            & (out["pattern_bearish_engulfing"] | out["pattern_shooting_star"] | bear_marubozu | tweezer_top | evening_star)
+            & (rvol >= 0.85)
+        )
+
+        # 3. High-Conviction Confluence Reversal & Healthy-Flow Signals (strictly on closed candles)
+        raw_bull_rev = (
             morning_star
-            | (out["pattern_bullish_engulfing"] & near_oversold & vol_confirmed)
-            | ((out["pattern_hammer"] | out["pattern_dragonfly_doji"] | tweezer_bot) & (out["regime_oversold"] | (rsi <= 43.0)))
-            | (inv_hammer & out["regime_oversold"])
-            | (standard_doji & out["regime_oversold"] & (cmf >= -0.05))
+            | (out["pattern_bullish_engulfing"] & near_oversold & vol_confirmed & (cmf >= -0.06))
+            | ((out["pattern_hammer"] | out["pattern_dragonfly_doji"] | tweezer_bot) & out["regime_oversold"] & (cmf >= -0.04) & (rvol >= 0.95))
+            | (inv_hammer & out["regime_oversold"] & (rvol >= 1.10) & (cmf >= -0.02))
+        )
+        strong_bullish_reversal = (
+            (raw_bull_rev & (~in_downtrend | bull_counter_ok)) | bull_trend_pullback
         ).fillna(False)
 
-        strong_bearish_reversal = (
+        raw_bear_rev = (
             evening_star
-            | (out["pattern_bearish_engulfing"] & near_overbought & vol_confirmed)
-            | ((out["pattern_shooting_star"] | out["pattern_gravestone_doji"] | tweezer_top) & (out["regime_overbought"] | (rsi >= 57.0)))
-            | (hanging_man & out["regime_overbought"])
-            | (standard_doji & out["regime_overbought"] & (cmf <= 0.05))
+            | (out["pattern_bearish_engulfing"] & near_overbought & vol_confirmed & (cmf <= 0.06))
+            | ((out["pattern_shooting_star"] | out["pattern_gravestone_doji"] | tweezer_top) & out["regime_overbought"] & (cmf <= 0.04) & (rvol >= 0.95))
+            | (hanging_man & out["regime_overbought"] & (rvol >= 1.10) & (cmf <= 0.02))
+        )
+        strong_bearish_reversal = (
+            (raw_bear_rev & (~in_uptrend | bear_counter_ok)) | bear_trend_pullback
         ).fillna(False)
 
         signal_conditions = [
@@ -485,9 +542,12 @@ class SignalEngine:
         sig_timestamps = []
         fee_drag_r = 0.06  # Realistic round-trip fee + slippage drag in R units
 
-        # Evaluate only signals that have at least `horizon` subsequent closed bars
+        # Evaluate non-overlapping live-equivalent setups (1 active position at a time, matching SignalLedger)
         max_idx = len(df) - horizon - 1
+        next_allowed_idx = 5
         for i in range(5, max_idx):
+            if i < next_allowed_idx:
+                continue
             sig = sigs[i]
             if sig not in ("BULLISH_REVERSAL", "BEARISH_REVERSAL"):
                 continue
@@ -495,9 +555,10 @@ class SignalEngine:
             entry = float(closes[i])
             if entry <= 0:
                 continue
-            risk_1r = max(float(atrs[i]), entry * 0.004)
-            tp1_dist = 0.85 * risk_1r
-            target_dist = 1.40 * risk_1r
+            # Institutional volatility-breathing stop (1.20 ATR) & realistic staged targets (0.80R TP1 lock + BE / 1.70R TP2 runner)
+            risk_1r = max(1.20 * float(atrs[i]), entry * 0.0045)
+            tp1_dist = 0.80 * risk_1r
+            target_dist = 1.70 * risk_1r
 
             future_high = float(np.max(highs[i + 1 : i + 1 + horizon]))
             future_low = float(np.min(lows[i + 1 : i + 1 + horizon]))
@@ -513,6 +574,7 @@ class SignalEngine:
 
                 outcome_r = None
                 reached_tp1 = False
+                bars_held = horizon
                 for step in range(1, horizon + 1):
                     bar_low = float(lows[i + step])
                     bar_high = float(highs[i + step])
@@ -521,20 +583,24 @@ class SignalEngine:
                     hit_target = (bar_high - entry) >= target_dist
                     if not reached_tp1 and hit_stop:
                         outcome_r = -1.0
+                        bars_held = step
                         break
                     if hit_target:
                         reached_tp1 = True
-                        outcome_r = 0.5 * 0.85 + 0.5 * 1.40  # +1.125R blended TP1 + TP2
+                        outcome_r = 0.5 * 0.80 + 0.5 * 1.70  # +1.25R blended TP1 + TP2
+                        bars_held = step
                         break
                     if hit_tp1:
                         reached_tp1 = True
                     if reached_tp1 and bar_low <= entry:
-                        outcome_r = 0.5 * 0.85  # +0.425R (50% closed at TP1, 50% closed at breakeven)
+                        outcome_r = 0.5 * 0.80  # +0.40R (50% closed at TP1, 50% closed at breakeven)
+                        bars_held = step
                         break
+                next_allowed_idx = i + max(1, bars_held)
 
                 if outcome_r is None:
-                    raw_end_r = float(np.clip((future_close - entry) / risk_1r, -1.0, 1.40))
-                    outcome_r = (0.5 * 0.85 + 0.5 * max(0.0, raw_end_r)) if reached_tp1 else raw_end_r
+                    raw_end_r = float(np.clip((future_close - entry) / risk_1r, -1.0, 1.70))
+                    outcome_r = (0.5 * 0.80 + 0.5 * max(0.0, raw_end_r)) if reached_tp1 else raw_end_r
 
                 if reached_tp1:
                     tp1_hits += 1
@@ -558,6 +624,7 @@ class SignalEngine:
 
                 outcome_r = None
                 reached_tp1 = False
+                bars_held = horizon
                 for step in range(1, horizon + 1):
                     bar_low = float(lows[i + step])
                     bar_high = float(highs[i + step])
@@ -566,20 +633,24 @@ class SignalEngine:
                     hit_target = (entry - bar_low) >= target_dist
                     if not reached_tp1 and hit_stop:
                         outcome_r = -1.0
+                        bars_held = step
                         break
                     if hit_target:
                         reached_tp1 = True
-                        outcome_r = 0.5 * 0.85 + 0.5 * 1.40
+                        outcome_r = 0.5 * 0.80 + 0.5 * 1.70
+                        bars_held = step
                         break
                     if hit_tp1:
                         reached_tp1 = True
                     if reached_tp1 and bar_high >= entry:
-                        outcome_r = 0.5 * 0.85
+                        outcome_r = 0.5 * 0.80
+                        bars_held = step
                         break
+                next_allowed_idx = i + max(1, bars_held)
 
                 if outcome_r is None:
-                    raw_end_r = float(np.clip((entry - future_close) / risk_1r, -1.0, 1.40))
-                    outcome_r = (0.5 * 0.85 + 0.5 * max(0.0, raw_end_r)) if reached_tp1 else raw_end_r
+                    raw_end_r = float(np.clip((entry - future_close) / risk_1r, -1.0, 1.70))
+                    outcome_r = (0.5 * 0.80 + 0.5 * max(0.0, raw_end_r)) if reached_tp1 else raw_end_r
 
                 if reached_tp1:
                     tp1_hits += 1
@@ -1587,6 +1658,9 @@ class SignalEngine:
         adx_val = float(eval_row.get("adx", 20.0)) if pd.notna(eval_row.get("adx", np.nan)) else 20.0
         hurst_val = float(eval_row.get("hurst_exponent", 0.5)) if pd.notna(eval_row.get("hurst_exponent", np.nan)) else 0.5
         chop_val = float(eval_row.get("choppiness_index", 50.0)) if pd.notna(eval_row.get("choppiness_index", np.nan)) else 50.0
+        eff_ratio = float(eval_row.get("efficiency_ratio", 0.35)) if pd.notna(eval_row.get("efficiency_ratio", np.nan)) else 0.35
+        ema20_slope = float(eval_row.get("ema20_slope_atr", 0.0)) if pd.notna(eval_row.get("ema20_slope_atr", np.nan)) else 0.0
+        ema50_slope = float(eval_row.get("ema50_slope_atr", 0.0)) if pd.notna(eval_row.get("ema50_slope_atr", np.nan)) else 0.0
         kalman_price = float(eval_row.get("kalman_trend", live_close)) if pd.notna(eval_row.get("kalman_trend", np.nan)) else live_close
         kalman_slope = float(eval_row.get("kalman_slope", 0.0)) if pd.notna(eval_row.get("kalman_slope", np.nan)) else 0.0
         avwap_high_p = float(eval_row.get("avwap_high", live_close)) if pd.notna(eval_row.get("avwap_high", np.nan)) else live_close
@@ -1594,8 +1668,13 @@ class SignalEngine:
 
         st_dir = int(eval_row.get("supertrend_dir", 1))
         macd_hist = float(eval_row.get("macd_hist", 0.0)) if pd.notna(eval_row.get("macd_hist", np.nan)) else 0.0
+        vwmacd_hist = float(eval_row.get("vwmacd_hist", macd_hist)) if pd.notna(eval_row.get("vwmacd_hist", np.nan)) else macd_hist
         mfi_val = float(eval_row.get("mfi", 50.0)) if pd.notna(eval_row.get("mfi", np.nan)) else 50.0
         cmf_val = float(eval_row.get("cmf", 0.0)) if pd.notna(eval_row.get("cmf", np.nan)) else 0.0
+        flow_persist = float(eval_row.get("flow_persistence", 0.0)) if pd.notna(eval_row.get("flow_persistence", np.nan)) else 0.0
+        cvd_vel_z = float(eval_row.get("cvd_velocity_z", 0.0)) if pd.notna(eval_row.get("cvd_velocity_z", np.nan)) else 0.0
+        bar_flow_health = float(eval_row.get("flow_health_score", 0.0)) if pd.notna(eval_row.get("flow_health_score", np.nan)) else 0.0
+        rvol_eval = float(eval_row.get("rvol", 1.0)) if pd.notna(eval_row.get("rvol", np.nan)) else 1.0
         obv_bull = bool(eval_row.get("obv", 0.0) >= eval_row.get("obv_ema20", 0.0))
         cvd_bull = bool(eval_row.get("cvd", 0.0) >= eval_row.get("cvd_ema20", 0.0))
         has_real_taker = bool(eval_row.get("has_real_taker_flow", False))
@@ -1641,11 +1720,23 @@ class SignalEngine:
             t_score -= 20.0
             trend_name_tr = f"Kısa Vadeli Zayıflama (Fiyat < EMA20 | {swing_structure_tr})"
 
-        # Zero-Lag Kalman Filter confirmation
+        # Zero-Lag Kalman Filter + EMA Velocity + 3-Bar Closed Persistence (eliminates 1-bar whipsaws)
         if live_close >= kalman_price and kalman_slope >= 0:
             t_score += 12.0
         elif live_close < kalman_price and kalman_slope < 0:
             t_score -= 12.0
+
+        # EMA20 / EMA50 slope velocity confirmation
+        slope_blend = 0.65 * ema20_slope + 0.35 * ema50_slope
+        t_score += float(np.clip(slope_blend * 18.0, -14.0, 14.0))
+
+        # 3-bar closed candle persistence relative to EMA20 (prevents single-wick false flips)
+        if len(closed_df) >= 3 and "ema_20" in closed_df.columns:
+            tail3_above = int((closed_df["close"].tail(3) >= closed_df["ema_20"].tail(3)).sum())
+            if tail3_above == 3:
+                t_score += 8.0
+            elif tail3_above == 0:
+                t_score -= 8.0
 
         t_score += 12.0 if live_close > ema200 else -12.0
 
@@ -1656,35 +1747,46 @@ class SignalEngine:
             t_score -= 22.0
             supertrend_status_tr = "NEGATİF (SuperTrend Satış Yönünde)"
 
+        # Dampen raw trend conviction when Kaufman Efficiency Ratio shows pure whipsaw noise (ER < 0.18)
+        if eff_ratio < 0.18 and chop_val >= 58.0:
+            t_score *= 0.78
+
         t_score = float(np.clip(t_score, -100.0, 100.0))
 
         # ==================================================================
-        # LAYER 2: REAL TAKER MONEY FLOW, ABSORPTION, OI MATRIX & SPOT/PERP CVD (-100 to +100)
+        # LAYER 2: HEALTHY REAL TAKER MONEY FLOW, PERSISTENCE, ABSORPTION & SPOT/PERP CVD (-100 to +100)
         # ==================================================================
         mf_score = 0.0
-        mf_score += float(np.clip(cmf_val * 190.0, -38.0, 38.0))
-        mf_score += 14.0 if cvd_bull else -14.0
-        mf_score += 10.0 if obv_bull else -10.0
+        mf_score += float(np.clip(cmf_val * 175.0, -34.0, 34.0))
+        mf_score += float(np.clip(flow_persist * 140.0, -22.0, 22.0))
+        mf_score += float(np.clip(cvd_vel_z * 6.5, -15.0, 15.0))
+        mf_score += 10.0 if cvd_bull else -10.0
+        mf_score += 8.0 if obv_bull else -8.0
 
-        if mfi_val >= 55.0 and mfi_val < 80.0:
-            mf_score += 14.0
-        elif mfi_val <= 45.0 and mfi_val > 20.0:
-            mf_score -= 14.0
-        elif mfi_val <= 20.0:
-            mf_score += 12.0
-        elif mfi_val >= 80.0:
-            mf_score -= 12.0
-
-        # Check recent 4-bar Limit Order Absorption (Pasif Limit Duvarı Emilimi)
+        # Check recent 4-bar Limit Order Absorption BEFORE MFI extremes so waterfall dumps aren't misread as bullish!
         absorption_status_tr = "Normal Piyasa Akışı (Belirgin Limit Emilimi Yok)"
+        has_bull_abs = False
+        has_bear_abs = False
         if "absorption_signal" in closed_df.columns:
             rec_abs = closed_df["absorption_signal"].tail(4).tolist()
             if "BULL_ABSORPTION" in rec_abs:
+                has_bull_abs = True
                 mf_score += 14.0
                 absorption_status_tr = "🟢 Kurumsal Alım Emilimi (Pasif Limit Alıcılar Satışı Emdi)"
             elif "BEAR_ABSORPTION" in rec_abs:
+                has_bear_abs = True
                 mf_score -= 14.0
                 absorption_status_tr = "🔴 Kurumsal Satış Emilimi (Pasif Limit Satıcılar Alışı Emdi)"
+
+        if mfi_val >= 54.0 and mfi_val < 80.0:
+            mf_score += 13.0
+        elif mfi_val <= 46.0 and mfi_val > 20.0:
+            mf_score -= 13.0
+        elif mfi_val <= 20.0:
+            # Extreme low MFI is ONLY bullish if institutional absorption or positive CVD velocity confirms accumulation!
+            mf_score += 10.0 if (has_bull_abs or cvd_vel_z > 0.25) else -8.0
+        elif mfi_val >= 80.0:
+            mf_score += -10.0 if (has_bear_abs or cvd_vel_z < -0.25) else 6.0
 
         cvd_div_tr, cvd_div_boost = self.detect_cvd_divergences(closed_df)
         mf_score += cvd_div_boost
@@ -1795,16 +1897,26 @@ class SignalEngine:
             money_flow_status_tr = f"Dengeli / Hafif Satıcı Akışı (CMF: {cmf_val:+.2f} | MFI: {mfi_val:.1f})"
 
         # ==================================================================
-        # LAYER 3: MOMENTUM & RSI DIVERGENCE (-100 to +100)
+        # LAYER 3: REGIME-SMART MOMENTUM, VWMACD & TIME-DECAYED DIVERGENCE (-100 to +100)
         # ==================================================================
         m_score = 0.0
-        is_strong_trend = (adx_val >= 25.0) or (hurst_val >= 0.56 and chop_val <= 44.0)
+        is_strong_trend = (adx_val >= 25.0) or (eff_ratio >= 0.42 and chop_val <= 48.0) or (hurst_val >= 0.56 and chop_val <= 44.0)
         if rsi <= 30.0:
-            m_score += 20.0 if (is_strong_trend and t_score < -40) else 38.0
-            momentum_tr = f"Aşırı Satım Bölgesi — Dip Tepkisi Adayı (RSI: {rsi:.1f})"
+            if is_strong_trend and t_score <= -40.0 and mf_score <= -15.0 and not has_bull_abs:
+                # Waterfall selloff: oversold RSI is bearish momentum continuation, NOT a blind buy!
+                m_score -= 8.0
+                momentum_tr = f"Güçlü Satış İvmesi / Aşırı Satım Baskısı (RSI: {rsi:.1f})"
+            else:
+                m_score += 24.0 if (is_strong_trend and t_score < -35.0) else 36.0
+                momentum_tr = f"Aşırı Satım Bölgesi — Dip Tepkisi Adayı (RSI: {rsi:.1f})"
         elif rsi >= 70.0:
-            m_score -= 15.0 if (is_strong_trend and t_score > 40) else 38.0
-            momentum_tr = f"Aşırı Alım Bölgesi — Kâr Satışı / Düzeltme Riski (RSI: {rsi:.1f})"
+            if is_strong_trend and t_score >= 40.0 and mf_score >= 15.0 and not has_bear_abs:
+                # Strong volume-backed rally: overbought RSI confirms bullish impulse!
+                m_score += 8.0
+                momentum_tr = f"Güçlü Alım İvmesi / Momentum Rallisi (RSI: {rsi:.1f})"
+            else:
+                m_score -= 20.0 if (is_strong_trend and t_score > 35.0) else 36.0
+                momentum_tr = f"Aşırı Alım Bölgesi — Kâr Satışı / Düzeltme Riski (RSI: {rsi:.1f})"
         elif rsi >= 53.0:
             m_score += 28.0
             momentum_tr = f"Pozitif Momentum — Alıcılar Üstün (RSI: {rsi:.1f})"
@@ -1815,31 +1927,39 @@ class SignalEngine:
             momentum_tr = f"Nötr / Dengeli Momentum (RSI: {rsi:.1f})"
 
         prev_macd_hist = float(closed_df["macd_hist"].iloc[-2]) if len(closed_df) >= 2 and pd.notna(closed_df["macd_hist"].iloc[-2]) else macd_hist
-        if macd_hist > 0 and macd_hist >= prev_macd_hist:
-            m_score += 25.0
+        macd_rising = macd_hist >= prev_macd_hist
+        vw_aligned_bull = vwmacd_hist > 0
+        vw_aligned_bear = vwmacd_hist < 0
+        if macd_hist > 0 and macd_rising:
+            m_score += 26.0 if vw_aligned_bull else 14.0
         elif macd_hist > 0:
-            m_score += 10.0
-        elif macd_hist < 0 and macd_hist <= prev_macd_hist:
-            m_score -= 25.0
+            m_score += 12.0 if vw_aligned_bull else 4.0
+        elif macd_hist < 0 and (not macd_rising):
+            m_score -= 26.0 if vw_aligned_bear else 14.0
         else:
-            m_score -= 10.0
+            m_score -= 12.0 if vw_aligned_bear else 4.0
 
         divergences = self.detect_rsi_divergences(closed_df)
         divergence_status_tr = "Aktif RSI Uyumsuzluğu Yok"
         if divergences:
             latest_div = divergences[-1]
-            if (len(closed_df) - 1 - latest_div.idx_end) <= 18:
+            div_age = len(closed_df) - 1 - latest_div.idx_end
+            if div_age <= 16:
+                decay_mult = 1.0 if div_age <= 6 else (0.60 if div_age <= 11 else 0.30)
                 if latest_div.div_type == "BULLISH_DIV":
-                    m_score += 40.0
-                    divergence_status_tr = f"🟢 {latest_div.label_tr} (Fiyat Düşerken RSI Yükseldi)"
+                    # Invalidate bullish divergence if price already broke decisively below divergence pivot
+                    if live_close >= latest_div.price_end - 0.35 * atr_val:
+                        m_score += 38.0 * decay_mult
+                        divergence_status_tr = f"🟢 {latest_div.label_tr} ({div_age} mum önce — Fiyat Düşerken RSI Yükseldi)"
                 else:
-                    m_score -= 40.0
-                    divergence_status_tr = f"🔴 {latest_div.label_tr} (Fiyat Yükselirken RSI Düştü)"
+                    if live_close <= latest_div.price_end + 0.35 * atr_val:
+                        m_score -= 38.0 * decay_mult
+                        divergence_status_tr = f"🔴 {latest_div.label_tr} ({div_age} mum önce — Fiyat Yükselirken RSI Düştü)"
 
         m_score = float(np.clip(m_score, -100.0, 100.0))
 
         # ==================================================================
-        # LAYER 4: TIME-DECAYED VOLUME PROFILE (POC), ANCHORED VWAP & SMC (-100 to +100)
+        # LAYER 4: TIME-DECAYED VOLUME PROFILE (POC), ANCHORED VWAP & BAND-WALK AWARE SMC (-100 to +100)
         # ==================================================================
         s_score = 0.0
         s_score += 16.0 if live_close >= vwap_val else -16.0
@@ -1852,12 +1972,22 @@ class SignalEngine:
             s_score -= 12.0
 
         squeeze_tag = " [Bollinger Sıkışması — Sert Kırılım Hazırlığı]" if bb_squeeze else ""
+        is_bull_band_walk = is_strong_trend and t_score >= 30.0 and mf_score >= 12.0 and rvol_eval >= 1.05
+        is_bear_band_walk = is_strong_trend and t_score <= -30.0 and mf_score <= -12.0 and rvol_eval >= 1.05
         if pct_b < 0.10:
-            bb_status_tr = f"Alt Bollinger Bandında — İstatistiksel Ucuz Bölge (%B: %{pct_b*100:.0f}){squeeze_tag}"
-            s_score += 24.0
+            if is_bear_band_walk and not has_bull_abs:
+                bb_status_tr = f"Alt Bollinger Kırılım Yürüyüşü — Güçlü Satış İvmesi (%B: %{pct_b*100:.0f}){squeeze_tag}"
+                s_score -= 18.0
+            else:
+                bb_status_tr = f"Alt Bollinger Bandında — İstatistiksel Ucuz Bölge (%B: %{pct_b*100:.0f}){squeeze_tag}"
+                s_score += 20.0
         elif pct_b > 0.90:
-            bb_status_tr = f"Üst Bollinger Bandında — İstatistiksel Pahalı Bölge (%B: %{pct_b*100:.0f}){squeeze_tag}"
-            s_score -= 24.0
+            if is_bull_band_walk and not has_bear_abs:
+                bb_status_tr = f"Üst Bollinger Kırılım Yürüyüşü — Güçlü Alım İvmesi (%B: %{pct_b*100:.0f}){squeeze_tag}"
+                s_score += 18.0
+            else:
+                bb_status_tr = f"Üst Bollinger Bandında — İstatistiksel Pahalı Bölge (%B: %{pct_b*100:.0f}){squeeze_tag}"
+                s_score -= 20.0
         elif pct_b >= 0.55:
             bb_status_tr = f"Bollinger Orta Bandı Üzerinde — Pozitif Kanal (%B: %{pct_b*100:.0f}){squeeze_tag}"
             s_score += 14.0
@@ -2068,7 +2198,29 @@ class SignalEngine:
                 "alt periyottaki geri çekilme 'Düşen Trend' sayılmaz (Trend İçi Düzeltme)."
             )
 
+        # v10.0 Institutional Flow Health Score (-100..+100) & Flow-Trend Coherence Calibration
+        flow_health_score = float(np.clip(0.55 * mf_score + 0.45 * bar_flow_health, -100.0, 100.0))
+        if "KALDIRAÇ KÖPÜĞÜ" in spot_perp_quality_tr:
+            flow_health_tr = f"⚠️ Sağlıksız Kaldıraç Köpüğü (Sağlık: {flow_health_score:+.0f}/100 — Spot Satarken Vadeli Alıyor)"
+        elif composite >= 12.0 and flow_health_score <= -18.0:
+            flow_health_tr = f"⚠️ Desteksiz / Hacimsiz Yükseliş Uyarısı (Sağlık: {flow_health_score:+.0f}/100 — Fiyat Çıkarken Para Çıkıyor)"
+            composite *= 0.65  # Prevent fake low-flow pumps from being scored as strong uptrends!
+        elif composite <= -12.0 and flow_health_score >= 18.0:
+            flow_health_tr = f"🟢 Düşüşte Kurumsal Dip Emilimi (Sağlık: {flow_health_score:+.0f}/100 — Satışlar Toplanıyor)"
+            composite *= 0.72
+        elif flow_health_score >= 25.0:
+            flow_health_tr = f"🟢 Sağlıklı & Tutarlı Kurumsal Para Girişi (Sağlık: {flow_health_score:+.0f}/100 | Verim: %{eff_ratio*100:.0f})"
+            if composite >= 15.0 and t_score >= 15.0:
+                composite *= 1.08  # Reward synchronized healthy trend + real inflow!
+        elif flow_health_score <= -25.0:
+            flow_health_tr = f"🔴 Baskın Kurumsal Para Çıkışı (Sağlık: {flow_health_score:+.0f}/100 | Verim: %{eff_ratio*100:.0f})"
+            if composite <= -15.0 and t_score <= -15.0:
+                composite *= 1.08
+        else:
+            flow_health_tr = f"⚖️ Dengeli / Nötr Likidite Akışı (Sağlık: {flow_health_score:+.0f}/100 | Verim: %{eff_ratio*100:.0f})"
+
         composite = float(np.clip(composite, -100.0, 100.0))
+        quant_score_raw = composite
 
         # Canonical Trend State Classification: UPTREND, DOWNTREND, SIDEWAYS
         if chop_val >= 59.0 and adx_val < 19.5 and abs(composite) < 22.0 and not has_bull_break and not has_bear_break:
@@ -2091,8 +2243,8 @@ class SignalEngine:
                 raw_conf -= 6.0  # Penalize overconfidence in choppy sideways regime
             confidence_pct = float(np.clip(raw_conf, 35.0, 96.0))
 
-        # Historical Path-Dependent & Fee-Adjusted Signal Backtest Validation
-        bt_stats = self.backtest_reversal_signals(closed_df, horizon=5)
+        # Historical Path-Dependent & Fee-Adjusted Signal Backtest Validation (8-bar institutional swing horizon)
+        bt_stats = self.backtest_reversal_signals(closed_df, horizon=8)
 
         if trend_state == "UPTREND":
             verdict_tr = (
@@ -2558,6 +2710,12 @@ class SignalEngine:
             aggregated_oi_usd=agg_oi_usd,
             oi_weighted_funding_pct=oi_w_funding,
             contradiction_veto_tr=contradiction_veto_tr,
+            flow_health_score=flow_health_score,
+            flow_health_tr=flow_health_tr,
+            efficiency_ratio=eff_ratio,
+            quant_score_raw=quant_score_raw,
+            ai_score_adjustment=0.0,
+            engine_mode_tr="⚙️ Bağımsız Kantitatif Motor v10 (Tam Kapasite)",
         )
 
     @staticmethod

@@ -174,12 +174,14 @@ class AnalysisPipeline:
         timeframe: str = "4H",
         model: Optional[str] = None,
         force_refresh: bool = False,
+        enable_ai: bool = True,
     ) -> Any:
         """
-        Generates (or fetches from cache) a Local AI Executive Summary & Contradiction Audit
-        for `bundle.tf_forecasts[timeframe]` and attaches it to `fc.ai_report`.
+        Generates (or fetches from cache) a Hybrid AI + Quant v10 Direction & Contradiction Report
+        for `bundle.tf_forecasts[timeframe]` and fuses it into `fc`.
+        When `enable_ai=False` or Ollama is offline, runs the full Standalone Quantitative Synthesis v10.
         """
-        from .local_ai import DEFAULT_OLLAMA_MODEL, generate_ai_executive_summary
+        from .local_ai import DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL, generate_ai_executive_summary
 
         tf_up = timeframe.upper()
         if tf_up not in bundle.tf_forecasts:
@@ -187,6 +189,7 @@ class AnalysisPipeline:
         fc = bundle.tf_forecasts[tf_up]
         df_tf = bundle.tf_data.get(tf_up)
         curr_p = float(df_tf["close"].iloc[-1]) if df_tf is not None and len(df_tf) > 0 else bundle.current_price
+        eff_url = DEFAULT_OLLAMA_BASE_URL if enable_ai else "http://127.0.0.1:1"
         rep = generate_ai_executive_summary(
             symbol=bundle.symbol,
             timeframe=tf_up,
@@ -195,7 +198,10 @@ class AnalysisPipeline:
             mtf_scores=bundle.mtf_scores,
             order_flow=bundle.order_flow,
             model=model or DEFAULT_OLLAMA_MODEL,
+            base_url=eff_url,
             force_refresh=force_refresh,
+            apply_fusion=True,
         )
         fc.ai_report = rep
+        bundle.mtf_scores[tf_up] = fc.score
         return rep

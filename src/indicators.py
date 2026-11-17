@@ -281,6 +281,52 @@ class TechnicalIndicators:
             default="NONE",
         )
 
+        # 7. v10.0 Healthy Money-Flow Persistence, Active CVD Velocity & Flow Quality Score (-100..+100)
+        quote_usd_est = (
+            df["quote_volume"].fillna(raw_money_flow)
+            if "quote_volume" in df.columns
+            else raw_money_flow
+        ).replace(0.0, np.nan)
+        roll_delta_8 = net_money_delta_usd.rolling(window=8, min_periods=2).sum()
+        roll_quote_8 = quote_usd_est.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
+        flow_persistence = (roll_delta_8 / roll_quote_8).fillna(0.0).clip(-1.0, 1.0)
+
+        cvd_vel_5 = cvd.diff(5).fillna(0.0)
+        cvd_vel_mean = cvd_vel_5.rolling(window=40, min_periods=10).mean()
+        cvd_vel_std = cvd_vel_5.rolling(window=40, min_periods=10).std(ddof=0).replace(0.0, np.nan)
+        cvd_velocity_z = ((cvd_vel_5 - cvd_vel_mean) / cvd_vel_std).fillna(0.0).clip(-5.0, 5.0)
+
+        # Volume-Weighted MACD Histogram (filters low-volume fake momentum ticks)
+        vwma_12 = (
+            raw_money_flow.rolling(window=12, min_periods=4).sum()
+            / vol.rolling(window=12, min_periods=4).sum().replace(0.0, np.nan)
+        ).fillna(close)
+        vwma_26 = (
+            raw_money_flow.rolling(window=26, min_periods=8).sum()
+            / vol.rolling(window=26, min_periods=8).sum().replace(0.0, np.nan)
+        ).fillna(close)
+        vwmacd_line = vwma_12 - vwma_26
+        vwmacd_sig = vwmacd_line.ewm(span=9, adjust=False).mean()
+        vwmacd_hist = (vwmacd_line - vwmacd_sig).fillna(0.0)
+
+        # Bar-by-bar Flow Health Score (-100..+100): rewards organic volume-backed inflow, penalizes divergent fake pumps
+        ret_5 = close.pct_change(5).fillna(0.0)
+        obv_sign = np.where(obv >= obv_ema20, 1.0, -1.0)
+        raw_health = (
+            np.clip(cmf * 165.0, -35.0, 35.0)
+            + np.clip(flow_persistence * 190.0, -30.0, 30.0)
+            + np.clip(cvd_velocity_z * 9.5, -22.0, 22.0)
+            + (8.0 * obv_sign)
+        )
+        # Penalize price rising on net outflow (fake pump) or falling into heavy accumulation (bear trap)
+        divergent_pump = (ret_5 > 0.006) & (flow_persistence < -0.025) & (cmf < -0.02)
+        divergent_dump = (ret_5 < -0.006) & (flow_persistence > 0.025) & (cmf > 0.02)
+        raw_health = np.where(divergent_pump, raw_health - 18.0, raw_health)
+        raw_health = np.where(divergent_dump, raw_health + 18.0, raw_health)
+        raw_health = np.where(bull_abs, raw_health + 14.0, raw_health)
+        raw_health = np.where(bear_abs, raw_health - 14.0, raw_health)
+        flow_health_score = pd.Series(raw_health, index=df.index).ewm(span=3, adjust=False).mean().clip(-100.0, 100.0)
+
         return pd.DataFrame({
             "mfi": mfi,
             "cmf": cmf,
@@ -295,6 +341,10 @@ class TechnicalIndicators:
             "absorption_signal": absorption_sig,
             "delta_zscore": delta_zscore,
             "flow_impulse_z": flow_impulse_z,
+            "flow_persistence": flow_persistence,
+            "cvd_velocity_z": cvd_velocity_z,
+            "vwmacd_hist": vwmacd_hist,
+            "flow_health_score": flow_health_score,
         }, index=df.index)
 
     @staticmethod
@@ -572,6 +622,16 @@ class TechnicalIndicators:
         enriched["ema_20"] = enriched["close"].ewm(span=self.config.ema_fast, adjust=False).mean()
         enriched["ema_50"] = enriched["close"].ewm(span=self.config.ema_slow, adjust=False).mean()
         enriched["ema_200"] = enriched["close"].ewm(span=self.config.ema_macro, adjust=False).mean()
+
+        # v10.0 Kaufman Efficiency Ratio (Signal-to-Noise Directional Purity, 0..1) & ATR-Normalized EMA Velocity
+        abs_diff_1 = enriched["close"].diff().abs()
+        net_change_14 = (enriched["close"] - enriched["close"].shift(14)).abs()
+        path_sum_14 = abs_diff_1.rolling(window=14, min_periods=4).sum().replace(0.0, np.nan)
+        enriched["efficiency_ratio"] = (net_change_14 / path_sum_14).fillna(0.35).clip(0.0, 1.0)
+
+        safe_atr = enriched["atr"].replace(0.0, np.nan).bfill().fillna(enriched["close"] * 0.01)
+        enriched["ema20_slope_atr"] = ((enriched["ema_20"] - enriched["ema_20"].shift(3)) / safe_atr).fillna(0.0).clip(-4.0, 4.0)
+        enriched["ema50_slope_atr"] = ((enriched["ema_50"] - enriched["ema_50"].shift(3)) / safe_atr).fillna(0.0).clip(-4.0, 4.0)
 
         vp = self.compute_volume_profile(enriched)
         enriched["vp_poc"] = vp["poc"]

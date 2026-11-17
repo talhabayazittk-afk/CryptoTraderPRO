@@ -865,6 +865,8 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
 
     def test_local_ai_contradictions_fallback_and_telegram_format(self):
         from src.local_ai import (
+            AIExecutiveReport,
+            apply_hybrid_direction_fusion,
             build_ai_summary_inline_keyboard,
             detect_analytical_contradictions,
             format_ai_summary_telegram_html,
@@ -874,13 +876,21 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
 
         df = CryptoDataFetcher.generate_synthetic_ohlcv(limit=220, timeframe="4h")
         df_ind = self.indicators.enrich(df)
+        for v10_col in ("flow_persistence", "cvd_velocity_z", "vwmacd_hist", "flow_health_score", "efficiency_ratio", "ema20_slope_atr"):
+            self.assertIn(v10_col, df_ind.columns)
         df_pat = self.detector.detect_all(df_ind)
         df_sig = self.signals.evaluate(df_pat)
         fc = self.signals.generate_forecast(df_sig, symbol="ETH/USDT")
+        self.assertGreaterEqual(fc.flow_health_score, -100.0)
+        self.assertLessEqual(fc.flow_health_score, 100.0)
+        self.assertGreaterEqual(fc.efficiency_ratio, 0.0)
+        self.assertLessEqual(fc.efficiency_ratio, 1.0)
         curr_p = float(df_sig["close"].iloc[-1])
 
         # Force cross-layer contradictions (Bullish score vs Bearish HTF + Negative Spot Delta + Close Resistance)
         fc.score = 28.0
+        fc.quant_score_raw = 28.0
+        fc.flow_health_score = -32.0
         fc.cmf_value = -0.09
         fc.net_delta_20_usd = -150_000.0
         fc.spot_delta_4h_usd = -400_000.0
@@ -898,7 +908,7 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         self.assertTrue(any("Zaman Dilimi Çelişkisi" in t for t in tensions))
         self.assertTrue(any("Spot-Vadeli Ayrışması" in t for t in tensions))
 
-        # Reset status cache to test graceful offline deterministic fallback
+        # Test Full Standalone Quantitative Synthesis when AI is offline (base_url unreachable)
         _lai._STATUS_CACHE = (0.0, False, [], "qwen2.5:3b")
         fb_rep = generate_ai_executive_summary(
             symbol="ETH/USDT",
@@ -913,11 +923,27 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
 
         self.assertFalse(fb_rep.is_ai_generated)
         self.assertEqual(fb_rep.stance_code, "CONTRADICTION_TRAP")
+        self.assertIn("Bağımsız Kantitatif Motor v10", fb_rep.engine_mode_tr)
         self.assertIn("YTD", fb_rep.action_plan_tr)
+
+        # Test Hybrid AI Fusion respects hard Contradiction Veto Lock
+        fc.contradiction_veto_tr = "🔒 Üst Periyot Çelişki Kilidi Aktif"
+        fc.quant_score_raw = 10.0
+        fc.score = 10.0
+        mock_ai = AIExecutiveReport(
+            symbol="ETH/USDT",
+            timeframe="4H",
+            stance_code="BULLISH",
+            ai_score_delta=7.5,
+            is_ai_generated=True,
+            model_used="qwen2.5:3b",
+        )
+        apply_hybrid_direction_fusion(fc, mock_ai)
+        self.assertLessEqual(fc.score, 12.0)  # Hard lock never exceeded!
 
         tg_html = format_ai_summary_telegram_html(fb_rep, current_price=curr_p)
         self.assertIn("ETH/USDT", tg_html)
-        self.assertIn("AI YÖNETİCİ ÖZETİ", tg_html)
+        self.assertIn("HİBRİT YÖN", tg_html)
         kb_ai = build_ai_summary_inline_keyboard("ETH/USDT", "4H")
         self.assertEqual(len(kb_ai["inline_keyboard"]), 3)
 

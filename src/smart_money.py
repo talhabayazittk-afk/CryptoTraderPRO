@@ -383,6 +383,52 @@ class SmartMoneyEngine:
         current_price = float(df["close"].iloc[-1])
         atr_val = float(sub["atr"].iloc[-1]) if "atr" in sub.columns and pd.notna(sub["atr"].iloc[-1]) else current_price * 0.008
         band_half = max(atr_val * 0.18, current_price * 0.0015)
+
+        # Priority 1: Use REAL Exchange-Backed Liquidation Map (Binance 48H OI-Delta Profile + OKX/Gate)
+        liq_map = getattr(order_flow, "liquidation_map", None) if order_flow is not None else None
+        if liq_map is not None and getattr(liq_map, "is_real_data", False):
+            real_pools: List[LiquidationPool] = []
+
+            def _fmt_liq_usd(v: float) -> str:
+                if v >= 1_000_000:
+                    return f"${v / 1_000_000:,.2f}M"
+                if v >= 1_000:
+                    return f"${v / 1_000:,.0f}K"
+                return f"${v:,.0f}"
+
+            if getattr(liq_map, "short_clusters", None):
+                sc = liq_map.short_clusters[0]
+                if sc.price > current_price:
+                    dist = ((sc.price - current_price) / max(current_price, 1e-9)) * 100.0
+                    real_pools.append(
+                        LiquidationPool(
+                            pool_type="SHORT_LIQ",
+                            leverage_tag=f"🧲 {sc.leverage_tag} Short Likidasyon (~{_fmt_liq_usd(sc.estimated_usd)} · {sc.source})",
+                            price=float(sc.price),
+                            band_low=float(sc.price) - band_half,
+                            band_high=float(sc.price) + band_half,
+                            distance_pct=dist,
+                            density_score=max(1.0, min(10.0, sc.estimated_usd / 250_000.0)),
+                        )
+                    )
+            if getattr(liq_map, "long_clusters", None):
+                lc = liq_map.long_clusters[0]
+                if lc.price < current_price:
+                    dist = ((current_price - lc.price) / max(current_price, 1e-9)) * 100.0
+                    real_pools.append(
+                        LiquidationPool(
+                            pool_type="LONG_LIQ",
+                            leverage_tag=f"🧲 {lc.leverage_tag} Long Likidasyon (~{_fmt_liq_usd(lc.estimated_usd)} · {lc.source})",
+                            price=float(lc.price),
+                            band_low=float(lc.price) - band_half,
+                            band_high=float(lc.price) + band_half,
+                            distance_pct=dist,
+                            density_score=max(1.0, min(10.0, lc.estimated_usd / 250_000.0)),
+                        )
+                    )
+            if real_pools:
+                return real_pools
+
         cluster_tol = max(atr_val * 0.45, current_price * 0.004)
 
         # Compute OI & Funding Crowding Asymmetry Multipliers (Strictly from real derivative metrics)

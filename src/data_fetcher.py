@@ -8,7 +8,7 @@ Features:
     - Parallel Multi-Timeframe & Multi-Symbol Fetching via ThreadPoolExecutor
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -59,6 +59,35 @@ class MacroLiquidityIntel:
     altcoin_season_bias: float = 0.0   # -15.0 (Strong Risk-Off / Altcoin Drain) to +15.0 (Strong Altcoin Inflow)
     regime_code: str = "NEUTRAL"       # "ALT_INFLOW", "BTC_SAFETY", "CASH_FLIGHT", "BROAD_RALLY", "NEUTRAL"
     summary_tr: str = "Makro Likidite Dengeli"
+
+
+@dataclass
+class LiquidationCluster:
+    """Single real-data-derived resting leveraged liquidation cluster (Short above price / Long below price)."""
+    side: str                  # "SHORT_LIQ" or "LONG_LIQ"
+    price: float
+    distance_pct: float
+    estimated_usd: float = 0.0
+    leverage_tag: str = "25x"
+    source: str = "Binance OI-Profil"
+
+
+@dataclass
+class LiquidationMapIntel:
+    """
+    Real Exchange-Backed Liquidation Intelligence:
+      - Resting Short/Long liquidation clusters built from 48H Binance Futures OI-Delta Profile
+        (`openInterestHist` + `fapi/v1/klines` + `topLongShortPositionRatio`) with strict survival filtering
+        (already-swept positions are removed) and global 3-exchange OI scaling.
+      - Real 24H executed forced liquidations fetched directly from OKX & Gate.io public liquidation feeds.
+    """
+    short_clusters: List[LiquidationCluster] = field(default_factory=list)
+    long_clusters: List[LiquidationCluster] = field(default_factory=list)
+    executed_long_liq_24h_usd: float = 0.0
+    executed_short_liq_24h_usd: float = 0.0
+    executed_liq_count_24h: int = 0
+    source_summary: str = ""
+    is_real_data: bool = False
 
 
 @dataclass
@@ -115,6 +144,7 @@ class OrderFlowIntel:
     spot_source: str = ""
     futures_source: str = ""
     macro_liquidity: Optional[MacroLiquidityIntel] = None
+    liquidation_map: Optional[LiquidationMapIntel] = None
 
 
 @dataclass
@@ -146,6 +176,324 @@ _THREAD_LOCAL = threading.local()
 _MACRO_LOCK = threading.Lock()
 _MACRO_CACHE: Tuple[float, Optional[MacroLiquidityIntel]] = (0.0, None)
 MACRO_CACHE_TTL_SEC = 120.0
+_CONTRACT_MULT_CACHE: Dict[str, float] = {}
+
+
+def build_liquidation_map_from_exchange_data(
+    current_price: float,
+    oi_hist: Optional[List[Dict[str, Any]]],
+    futures_klines: Optional[List[List[Any]]],
+    pos_ratios: Optional[List[Dict[str, Any]]] = None,
+    global_oi_scale: float = 1.0,
+    executed_long_liq_24h_usd: float = 0.0,
+    executed_short_liq_24h_usd: float = 0.0,
+    executed_liq_count_24h: int = 0,
+    executed_sources: Optional[List[str]] = None,
+) -> LiquidationMapIntel:
+    """
+    Computes surviving resting Short & Long liquidation clusters directly from real exchange futures data:
+      - Hourly Open Interest Delta (`openInterestHist`) aligned with Binance Futures 1H klines (`fapi/v1/klines`)
+      - Hourly Top-Trader Long/Short Position Ratio (`topLongShortPositionRatio`)
+      - Survival filtering: positions whose leverage liquidation price was already crossed by subsequent
+        1H candle High (for Shorts) or Low (for Longs) are discarded so only ACTIVE resting clusters remain.
+      - Combines real 24H executed liquidation totals from OKX & Gate.io.
+    """
+    result = LiquidationMapIntel(
+        executed_long_liq_24h_usd=float(executed_long_liq_24h_usd),
+        executed_short_liq_24h_usd=float(executed_short_liq_24h_usd),
+        executed_liq_count_24h=int(executed_liq_count_24h),
+    )
+    if current_price <= 0 or not futures_klines or len(futures_klines) < 6:
+        if executed_sources:
+            result.source_summary = "+".join(executed_sources) + " Gerçek Likidasyon"
+            result.is_real_data = executed_liq_count_24h > 0
+        return result
+
+    # Align hourly klines by timestamp (rounded to 1h ms = 3_600_000)
+    hr_ms = 3_600_000
+    k_rows: List[Tuple[int, float, float, float, float]] = []
+    for row in futures_klines:
+        try:
+            ts = (int(row[0]) // hr_ms) * hr_ms
+            hi = float(row[2])
+            lo = float(row[3])
+            cl = float(row[4])
+            qvol = float(row[7]) if len(row) > 7 else 0.0
+            if hi > 0 and lo > 0 and cl > 0:
+                k_rows.append((ts, hi, lo, cl, qvol))
+        except Exception:
+            continue
+
+    if len(k_rows) < 6:
+        return result
+
+    # Map OI values by hour bucket
+    oi_by_hr: Dict[int, float] = {}
+    if oi_hist:
+        for item in oi_hist:
+            try:
+                ts = (int(item.get("timestamp", 0)) // hr_ms) * hr_ms
+                val = float(item.get("sumOpenInterestValue") or 0.0)
+                if ts > 0 and val > 0:
+                    oi_by_hr[ts] = val
+            except Exception:
+                continue
+
+    # Map long share by hour bucket
+    long_share_by_hr: Dict[int, float] = {}
+    if pos_ratios:
+        for item in pos_ratios:
+            try:
+                ts = (int(item.get("timestamp", 0)) // hr_ms) * hr_ms
+                la = float(item.get("longAccount") or 0.5)
+                if 0.05 <= la <= 0.95:
+                    long_share_by_hr[ts] = min(0.78, max(0.22, la))
+            except Exception:
+                continue
+
+    n = len(k_rows)
+    # Precompute suffix max high and suffix min low for O(1) survival checks
+    suffix_max_hi = [0.0] * n
+    suffix_min_lo = [float("inf")] * n
+    run_hi = 0.0
+    run_lo = float("inf")
+    for idx in range(n - 1, -1, -1):
+        suffix_max_hi[idx] = run_hi
+        suffix_min_lo[idx] = run_lo
+        if k_rows[idx][1] > run_hi:
+            run_hi = k_rows[idx][1]
+        if k_rows[idx][2] < run_lo:
+            run_lo = k_rows[idx][2]
+
+    oi_vals_present = [oi_by_hr[r[0]] for r in k_rows if r[0] in oi_by_hr]
+    latest_oi_usd = oi_vals_present[-1] if oi_vals_present else 0.0
+    total_qvol = sum(r[4] for r in k_rows) or 1.0
+    scale = max(1.0, min(4.0, float(global_oi_scale)))
+
+    # Standard futures leverage distribution (50x, 25x, 10x, 5x) & maintenance margin rate
+    lev_tiers = (
+        (50, 0.24, "50x"),
+        (25, 0.38, "25x"),
+        (10, 0.26, "10x"),
+        (5, 0.12, "5x"),
+    )
+    mmr = 0.004
+    bin_step = max(current_price * 0.0045, 1e-9)  # 0.45% price bins
+
+    short_bins: Dict[int, Tuple[float, float, str]] = {}  # bin_idx -> (weighted_price_sum, usd_sum, dom_lev)
+    long_bins: Dict[int, Tuple[float, float, str]] = {}
+    short_bin_lev_usd: Dict[Tuple[int, str], float] = {}
+    long_bin_lev_usd: Dict[Tuple[int, str], float] = {}
+
+    prev_oi: Optional[float] = None
+    last_ls = 0.50
+    for idx, (ts, hi, lo, cl, qvol) in enumerate(k_rows):
+        if ts in long_share_by_hr:
+            last_ls = long_share_by_hr[ts]
+        oi_cur = oi_by_hr.get(ts)
+
+        added_oi_usd = 0.0
+        if oi_cur is not None and prev_oi is not None:
+            delta_oi = oi_cur - prev_oi
+            if delta_oi > 0:
+                added_oi_usd = delta_oi
+        if oi_cur is not None:
+            prev_oi = oi_cur
+
+        # Add modest intraday turnover baseline proportional to real OI & candle quote volume
+        if latest_oi_usd > 0:
+            turnover_usd = (qvol / total_qvol) * latest_oi_usd * 0.18
+            effective_new_usd = (added_oi_usd + turnover_usd) * scale
+        else:
+            effective_new_usd = qvol * 0.05
+
+        if effective_new_usd <= 0:
+            continue
+
+        entry_p = (hi + lo + cl) / 3.0
+        new_long_usd = effective_new_usd * last_ls
+        new_short_usd = effective_new_usd * (1.0 - last_ls)
+        future_hi = suffix_max_hi[idx]
+        future_lo = suffix_min_lo[idx]
+
+        for lev, w, tag in lev_tiers:
+            # Long liquidation price below entry
+            liq_long = entry_p * (1.0 - (1.0 / lev) + mmr)
+            if (
+                current_price * 0.85 <= liq_long <= current_price * 0.994
+                and future_lo > liq_long
+            ):
+                b = int(round(liq_long / bin_step))
+                u = new_long_usd * w
+                prev_wp, prev_u, prev_tag = long_bins.get(b, (0.0, 0.0, tag))
+                long_bin_lev_usd[(b, tag)] = long_bin_lev_usd.get((b, tag), 0.0) + u
+                best_tag = prev_tag if long_bin_lev_usd.get((b, prev_tag), 0.0) >= long_bin_lev_usd[(b, tag)] else tag
+                long_bins[b] = (prev_wp + liq_long * u, prev_u + u, best_tag)
+
+            # Short liquidation price above entry
+            liq_short = entry_p * (1.0 + (1.0 / lev) - mmr)
+            if (
+                current_price * 1.006 <= liq_short <= current_price * 1.15
+                and future_hi < liq_short
+            ):
+                b = int(round(liq_short / bin_step))
+                u = new_short_usd * w
+                prev_wp, prev_u, prev_tag = short_bins.get(b, (0.0, 0.0, tag))
+                short_bin_lev_usd[(b, tag)] = short_bin_lev_usd.get((b, tag), 0.0) + u
+                best_tag = prev_tag if short_bin_lev_usd.get((b, prev_tag), 0.0) >= short_bin_lev_usd[(b, tag)] else tag
+                short_bins[b] = (prev_wp + liq_short * u, prev_u + u, best_tag)
+
+    def _extract_top_clusters(
+        bins_dict: Dict[int, Tuple[float, float, str]],
+        side: str,
+        max_n: int = 2,
+    ) -> List[LiquidationCluster]:
+        if not bins_dict:
+            return []
+        ranked = sorted(bins_dict.items(), key=lambda kv: kv[1][1], reverse=True)
+        selected: List[LiquidationCluster] = []
+        for _, (wp, u_tot, tag) in ranked:
+            if u_tot <= 0:
+                continue
+            avg_p = wp / u_tot
+            # Avoid picking two clusters within 1.2% of each other
+            if any(abs(avg_p - c.price) / max(current_price, 1e-9) < 0.012 for c in selected):
+                continue
+            dist_pct = abs(avg_p - current_price) / max(current_price, 1e-9) * 100.0
+            selected.append(
+                LiquidationCluster(
+                    side=side,
+                    price=avg_p,
+                    distance_pct=dist_pct,
+                    estimated_usd=u_tot,
+                    leverage_tag=tag,
+                    source="Binance OI-Profil",
+                )
+            )
+            if len(selected) >= max_n:
+                break
+        # Sort by distance so nearest major cluster is first
+        selected.sort(key=lambda c: c.distance_pct)
+        return selected
+
+    result.short_clusters = _extract_top_clusters(short_bins, "SHORT_LIQ", max_n=2)
+    result.long_clusters = _extract_top_clusters(long_bins, "LONG_LIQ", max_n=2)
+
+    src_parts: List[str] = []
+    if result.short_clusters or result.long_clusters:
+        src_parts.append("Binance OI-Profil" if latest_oi_usd > 0 else "Binance Vadeli Profil")
+    if executed_sources:
+        src_parts.append("+".join(executed_sources) + " Gerçek Likidasyon")
+    result.source_summary = " + ".join(src_parts) if src_parts else "Veri Yok"
+    result.is_real_data = bool(result.short_clusters or result.long_clusters or executed_liq_count_24h > 0)
+    return result
+
+
+def _fetch_executed_liquidations_24h(base_ccy: str) -> Tuple[float, float, int, List[str]]:
+    """
+    Fetches REAL executed forced liquidation orders from public OKX and Gate.io perpetual endpoints
+    (no API key required) over the last 24 hours.
+    Returns `(long_liq_usd, short_liq_usd, count, sources_list)`.
+    """
+    long_usd = 0.0
+    short_usd = 0.0
+    total_cnt = 0
+    sources: List[str] = []
+    cutoff_ms = int((time.time() - 86400.0) * 1000.0)
+    cutoff_sec = time.time() - 86400.0
+
+    # 1. OKX SWAP real filled liquidation orders
+    try:
+        uly = f"{base_ccy}-USDT"
+        ct_key = f"OKX:{uly}"
+        ct_val = _CONTRACT_MULT_CACHE.get(ct_key)
+        if ct_val is None:
+            inst_res = _http_get_json(
+                "https://www.okx.com/api/v5/public/instruments",
+                {"instType": "SWAP", "uly": uly},
+                timeout=2.2,
+            )
+            inst_list = inst_res.get("data", []) if isinstance(inst_res, dict) else []
+            if inst_list:
+                ct_val = float(inst_list[0].get("ctVal") or 1.0)
+                _CONTRACT_MULT_CACHE[ct_key] = ct_val
+            else:
+                ct_val = 0.0
+
+        if ct_val and ct_val > 0:
+            liq_res = _http_get_json(
+                "https://www.okx.com/api/v5/public/liquidation-orders",
+                {"instType": "SWAP", "uly": uly, "state": "filled", "limit": 100},
+                timeout=2.5,
+            )
+            data_list = liq_res.get("data", []) if isinstance(liq_res, dict) else []
+            okx_added = False
+            for grp in data_list:
+                for det in grp.get("details", []):
+                    ts_ms = int(det.get("ts") or det.get("time") or 0)
+                    if ts_ms < cutoff_ms:
+                        continue
+                    px = float(det.get("bkPx") or 0.0)
+                    sz = float(det.get("sz") or 0.0)
+                    pos_side = str(det.get("posSide") or "").lower()
+                    side = str(det.get("side") or "").lower()
+                    usd_v = px * sz * ct_val
+                    if usd_v <= 0:
+                        continue
+                    if pos_side == "long" or (pos_side == "net" and side == "sell"):
+                        long_usd += usd_v
+                    else:
+                        short_usd += usd_v
+                    total_cnt += 1
+                    okx_added = True
+            if okx_added:
+                sources.append("OKX")
+    except Exception:
+        pass
+
+    # 2. Gate.io USDT Perpetual real liquidation orders
+    try:
+        contract = f"{base_ccy}_USDT"
+        g_key = f"GATE:{contract}"
+        g_mult = _CONTRACT_MULT_CACHE.get(g_key)
+        if g_mult is None:
+            c_res = _http_get_json(f"https://api.gateio.ws/api/v4/futures/usdt/contracts/{contract}", timeout=2.0)
+            if isinstance(c_res, dict) and c_res.get("quanto_multiplier"):
+                g_mult = float(c_res["quanto_multiplier"])
+                _CONTRACT_MULT_CACHE[g_key] = g_mult
+            else:
+                g_mult = 0.0
+
+        if g_mult and g_mult > 0:
+            g_liq = _http_get_json(
+                "https://api.gateio.ws/api/v4/futures/usdt/liq_orders",
+                {"contract": contract, "limit": 100},
+                timeout=2.2,
+            )
+            if isinstance(g_liq, list) and g_liq:
+                g_added = False
+                for row in g_liq:
+                    t_s = float(row.get("time") or 0.0)
+                    if t_s < cutoff_sec:
+                        continue
+                    px = float(row.get("fill_price") or row.get("order_price") or 0.0)
+                    sz = float(row.get("size") or row.get("order_size") or 0.0)
+                    usd_v = abs(sz) * g_mult * px
+                    if usd_v <= 0:
+                        continue
+                    # Gate.io: negative size = forced sell (long liquidated), positive size = forced buy (short liquidated)
+                    if sz < 0:
+                        long_usd += usd_v
+                    else:
+                        short_usd += usd_v
+                    total_cnt += 1
+                    g_added = True
+                if g_added:
+                    sources.append("Gate")
+    except Exception:
+        pass
+
+    return long_usd, short_usd, total_cnt, sources
 
 
 def _merge_dual_probe_depth(
@@ -931,6 +1279,10 @@ class CryptoDataFetcher:
             )
             fut_sources: List[str] = []
             agg_oi_pairs: List[Tuple[str, float, Optional[float]]] = []  # (exchange, oi_usd, funding_pct)
+            bn_oih_raw: Optional[List[Dict[str, Any]]] = None
+            bn_fk_raw: Optional[List[List[Any]]] = None
+            bn_pos_ratio_raw: Optional[List[Dict[str, Any]]] = None
+            bn_oi_usd_ref: float = 0.0
 
             # 2a. Native Binance USD-M Futures (`fapi.binance.com`) — always queried for Global Aggregated OI & Exact Perp 1H/4H/24H Taker Delta
             try:
@@ -941,26 +1293,29 @@ class CryptoDataFetcher:
                     bn_fr_pct = float(pi["lastFundingRate"]) * 100.0
                     mp = float(pi.get("markPrice") or 0.0)
                     ip = float(pi.get("indexPrice") or 0.0)
+                    if mp > 0:
+                        mark_p_ref = mp
                     if ex_id == "binance" or intel.funding_rate_pct is None:
                         intel.funding_rate_pct = bn_fr_pct
                         if mp > 0 and ip > 0:
-                            mark_p_ref = mp
                             intel.perp_spot_basis_pct = ((mp - ip) / ip) * 100.0
                     if "BINANCE" not in fut_sources:
                         fut_sources.append("BINANCE")
 
                 oih = _http_get_json(
                     "https://fapi.binance.com/futures/data/openInterestHist",
-                    {"symbol": raw_sym, "period": "1h", "limit": 25},
+                    {"symbol": raw_sym, "period": "1h", "limit": 48},
                     timeout=3.0,
                 )
                 if isinstance(oih, list) and len(oih) >= 2:
+                    bn_oih_raw = oih
                     oi_now = float(oih[-1].get("sumOpenInterestValue") or 0.0)
                     oi_1h = float(oih[-2].get("sumOpenInterestValue") or 0.0)
                     oi_4h = float(oih[max(0, len(oih) - 5)].get("sumOpenInterestValue") or 0.0)
-                    oi_24h = float(oih[0].get("sumOpenInterestValue") or 0.0)
+                    oi_24h = float(oih[max(0, len(oih) - 25)].get("sumOpenInterestValue") or 0.0)
                     if oi_now > 0:
                         bn_oi_usd = oi_now
+                        bn_oi_usd_ref = oi_now
                         if ex_id == "binance" or intel.open_interest_usd is None:
                             intel.open_interest_usd = oi_now
                     if ex_id == "binance" or intel.oi_change_24h_pct is None:
@@ -974,13 +1329,17 @@ class CryptoDataFetcher:
                 if bn_oi_usd > 0:
                     agg_oi_pairs.append(("BINANCE", bn_oi_usd, bn_fr_pct))
 
-                # Exact 12-column Binance Perp 1H klines for down-to-the-dollar 1H / 4H / 24H Perp Taker Delta
+                # Exact 12-column Binance Perp 1H klines (48h for OI-Delta Liquidation Map + last 25 for 1H/4H/24H Perp Taker Delta)
                 fk_1h = _http_get_json(
                     "https://fapi.binance.com/fapi/v1/klines",
-                    {"symbol": raw_sym, "interval": "1h", "limit": 25},
+                    {"symbol": raw_sym, "interval": "1h", "limit": 48},
                     timeout=3.0,
                 )
-                perp_d = _extract_standardized_1h_4h_24h_deltas(fk_1h)
+                if isinstance(fk_1h, list) and len(fk_1h) >= 2:
+                    bn_fk_raw = fk_1h
+                    if mark_p_ref <= 0:
+                        mark_p_ref = float(fk_1h[-1][4] or 0.0)
+                perp_d = _extract_standardized_1h_4h_24h_deltas(fk_1h[-25:] if isinstance(fk_1h, list) else fk_1h)
                 if perp_d is not None:
                     intel.perp_delta_1h_usd, intel.perp_delta_4h_usd, intel.perp_cvd_delta_24h_usd = perp_d
                     if isinstance(fk_1h, list) and len(fk_1h) >= 2:
@@ -990,6 +1349,17 @@ class CryptoDataFetcher:
                         ts_v = max(0.0, q_v - tb_v)
                         if ts_v > 0 and (ex_id == "binance" or intel.futures_taker_buy_sell_ratio is None):
                             intel.futures_taker_buy_sell_ratio = tb_v / ts_v
+
+                try:
+                    pr_bn = _http_get_json(
+                        "https://fapi.binance.com/futures/data/topLongShortPositionRatio",
+                        {"symbol": raw_sym, "period": "1h", "limit": 48},
+                        timeout=2.5,
+                    )
+                    if isinstance(pr_bn, list) and len(pr_bn) >= 1:
+                        bn_pos_ratio_raw = pr_bn
+                except Exception:
+                    pass
 
                 if ex_id == "binance" or intel.long_short_ratio is None:
                     ls_bn = _http_get_json(
@@ -1123,6 +1493,29 @@ class CryptoDataFetcher:
                         intel.funding_rate_pct = intel.oi_weighted_funding_pct
 
             intel.futures_source = "+".join(fut_sources) if fut_sources else ""
+
+            # 2e. Real Exchange-Backed Liquidation Map (Binance 48H OI-Delta Profile + OKX/Gate 24H Executed Liquidations)
+            try:
+                liq_ref_price = mark_p_ref if mark_p_ref > 0 else mid_spot_ref
+                exec_long_24h, exec_short_24h, exec_cnt_24h, exec_srcs = _fetch_executed_liquidations_24h(base_ccy)
+                oi_scale = (
+                    (intel.aggregated_oi_usd / bn_oi_usd_ref)
+                    if (intel.aggregated_oi_usd and bn_oi_usd_ref > 0)
+                    else 1.0
+                )
+                intel.liquidation_map = build_liquidation_map_from_exchange_data(
+                    current_price=liq_ref_price,
+                    oi_hist=bn_oih_raw,
+                    futures_klines=bn_fk_raw,
+                    pos_ratios=bn_pos_ratio_raw,
+                    global_oi_scale=oi_scale,
+                    executed_long_liq_24h_usd=exec_long_24h,
+                    executed_short_liq_24h_usd=exec_short_24h,
+                    executed_liq_count_24h=exec_cnt_24h,
+                    executed_sources=exec_srcs,
+                )
+            except Exception as liq_exc:
+                logger.debug(f"Liquidation map build skipped ({target_symbol}): {liq_exc}")
 
             # Classify 4-Quadrant Open Interest (OI) x Price Regime
             if intel.oi_change_24h_pct is not None:

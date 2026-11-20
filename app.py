@@ -6,6 +6,7 @@ Derin Emir Defteri, Backtest Doğrulama & Çoklu Zaman Dilimi (15M, 1H, 4H, 1D) 
 Çalıştırmak için:
     py -3.13 -m streamlit run app.py
 """
+import html
 import importlib
 import inspect
 import json
@@ -55,6 +56,8 @@ if (
     or not hasattr(src.signal_ledger, "SignalLedger")
     or not hasattr(src.market_scanner, "MarketWideHunter")
     or not hasattr(src.local_ai, "generate_ai_executive_summary")
+    or not hasattr(src.local_ai, "build_unified_coin_analysis")
+    or not hasattr(src.data_fetcher, "LiquidationMapIntel")
 ):
     for _mod in (
         src.config,
@@ -92,8 +95,10 @@ from src.pipeline import AnalysisPipeline
 from src.local_ai import (
     DEFAULT_OLLAMA_MODEL,
     build_ai_summary_inline_keyboard,
+    build_unified_coin_analysis,
     check_ollama_status,
     format_ai_summary_telegram_html,
+    format_unified_analysis_telegram_html,
     generate_ai_executive_summary,
 )
 from src.signal_ledger import SignalLedger, format_ledger_telegram_html
@@ -1547,13 +1552,12 @@ else:
 
 st.markdown(
     f"""
-    <div style="background:#111827; border:1px solid #1E293B; border-left:5px solid {score_col}; border-radius:10px; padding:11px 16px; margin-bottom:10px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px;">
+    <div style="background:#111827; border:1px solid #1E293B; border-left:5px solid {score_col}; border-radius:10px; padding:10px 16px; margin-bottom:10px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px;">
         <div style="font-size:14px;">
-            <b style="color:#F8FAFC; font-size:15px;">{active_symbol} ({active_tf}) <span style="color:#64748B; font-size:12px;">[{source_used}]</span>:</b>
-            <span style="color:{score_col}; font-weight:800; font-size:15px; margin-left:6px;">{main_trend_title} ({fc_active.score:+.0f}/100)</span>
-            <span style="color:#94A3B8; font-size:13px; margin-left:6px;">— {main_trend_desc}</span>
+            <b style="color:#F8FAFC; font-size:15px;">{active_symbol} ({active_tf}) <span style="color:#64748B; font-size:12px;">[{source_used}]</span></b>
+            <span style="color:#E2E8F0; font-weight:700; margin-left:8px;">Fiyat: {price_fmt(last_price)} USDT</span>
             &nbsp;|&nbsp;
-            <span style="color:{rd_col}; font-weight:700; font-size:13px;">🚦 Hazırlık: {fc_active.readiness_score_5}/5 ({rd_short})</span>
+            <span style="color:{score_col}; font-weight:800;">{main_trend_title} ({fc_active.score:+.0f}/100)</span>
         </div>
         <div>
             {"".join(mtf_badges_html)}
@@ -1563,585 +1567,73 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if plain_guide_act:
-    st.markdown(
-        f"""
-        <div class="roadmap-banner" style="border-left-color:{score_col};">
-            <b style="color:#38BDF8;">🧭 SADE YOL HARİTASI (HİÇ VERİ BİLMEYENLER İÇİN TEKNİK ÖZET):</b>
-            <span style="margin-left:6px;">{plain_guide_act}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
 # ---------------------------------------------------------------------------
-# 1b. HYBRID QUANT v10 + LOCAL AI DIRECTION, FLOW HEALTH & CONTRADICTION PANEL
-#     (Runs Hybrid AI when enabled & online; runs Full Standalone Quant v10 when AI is off!)
+# 1b. UNIFIED HARMONIZED TECHNICAL, CASH-FLOW & REAL LIQUIDATION ANALYSIS
+#     (Single clean output — strictly chart & real exchange data, zero clutter)
 # ---------------------------------------------------------------------------
-force_ai_key = f"force_ai_refresh_{active_symbol}_{active_tf}"
-force_ai_now = bool(st.session_state.pop(force_ai_key, False))
 mtf_scores_act = {k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts}
-effective_ai_url = "http://127.0.0.1:11434" if enable_local_ai_chk else "http://127.0.0.1:1"
-with st.spinner(
-    f"🧠 Hibrit Yön Motoru ({selected_ollama_model}) {active_symbol} [{active_tf}] analizini kalibre ediyor..."
-    if (enable_local_ai_chk and ollama_online)
-    else f"⚙️ Bağımsız Kantitatif Motor v10 {active_symbol} [{active_tf}] analizini hazırlıyor..."
-):
-    ai_rep_active = generate_ai_executive_summary(
-        symbol=active_symbol,
-        timeframe=active_tf,
-        current_price=last_price,
-        fc=fc_active,
-        mtf_scores=mtf_scores_act,
-        order_flow=order_flow,
-        model=selected_ollama_model,
-        base_url=effective_ai_url,
-        force_refresh=force_ai_now,
-        apply_fusion=True,
-    )
-    fc_active.ai_report = ai_rep_active
+unified_active = build_unified_coin_analysis(
+    symbol=active_symbol,
+    timeframe=active_tf,
+    df=df_active,
+    fc=fc_active,
+    mtf_scores=mtf_scores_act,
+    order_flow=order_flow,
+)
 
-raw_q_sc = getattr(fc_active, "quant_score_raw", fc_active.score)
-ai_adj_sc = getattr(fc_active, "ai_score_adjustment", 0.0)
-fh_lbl = getattr(fc_active, "flow_health_tr", "") or ai_rep_active.flow_health_tr
-if ai_rep_active.is_ai_generated:
-    panel_title = f"🧠 HİBRİT YÖN, PARA GİRİŞ SAĞLIĞI &amp; ÇELİŞKİ SENTEZİ ({active_symbol} · {active_tf})"
-    ai_badge_txt = (
-        f"Hibrit: Kantitatif ({raw_q_sc:+.0f}) + {ai_rep_active.model_used} ({ai_adj_sc:+.1f}) → {fc_active.score:+.0f}/100 "
-        + ("· ⚡Önbellek" if ai_rep_active.from_cache else f"· {ai_rep_active.latency_sec:.1f}sn")
-    )
-else:
-    panel_title = f"⚙️ BAĞIMSIZ KANTİTATİF MOTOR v10 — YÖN, PARA SAĞLIĞI &amp; ÇELİŞKİ SENTEZİ ({active_symbol} · {active_tf})"
-    ai_badge_txt = f"Kendi Motoru (AI Kapalı/Bağımsız Mod) · Kantitatif Skor: {fc_active.score:+.0f}/100"
-
-tensions_html = ""
-if ai_rep_active.detected_tensions:
-    chips = "".join(
-        [
-            f"<div style='font-size:12px; color:#FCD34D; margin-top:3px;'>• {t_it}</div>"
-            for t_it in ai_rep_active.detected_tensions[:3]
-        ]
-    )
-    tensions_html = (
-        "<div style='margin-top:8px; padding-top:7px; border-top:1px dashed #334155;'>"
-        "<b style='font-size:12px; color:#F59E0B;'>🔎 Tespit Edilen Katmanlar Arası Uyarılar:</b>"
-        f"{chips}</div>"
-    )
-
-flow_health_row_html = (
-    f"<div style='font-size:13.2px; color:#A7F3D0; line-height:1.55; margin-bottom:6px;'>"
-    f"<b style='color:#34D399;'>💧 Para Giriş Sağlığı &amp; Akış Kalitesi:</b> {fh_lbl}</div>"
-    if fh_lbl
-    else ""
+u_col = unified_active.accent_color
+u_liq_col = (
+    "#FF5252"
+    if unified_active.expected_first_liq_side == "LONG_LIQ"
+    else ("#00E676" if unified_active.expected_first_liq_side == "SHORT_LIQ" else "#FACC15")
 )
 
 st.markdown(
     f"""
-    <div style="background:linear-gradient(95deg, rgba(17, 24, 39, 0.98) 0%, rgba(15, 23, 42, 0.95) 100%); border:1px solid #334155; border-left:5px solid {ai_rep_active.accent_color}; border-radius:10px; padding:14px 18px; margin-bottom:10px; box-shadow:0 4px 14px rgba(0,0,0,0.38);">
-        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
-            <span style="font-size:14.5px; font-weight:800; color:#C084FC;">
-                {panel_title}
-            </span>
-            <span style="font-size:12px; font-weight:700; color:{ai_rep_active.accent_color}; background:#0B0F19; border:1px solid {ai_rep_active.accent_color}; border-radius:16px; padding:3px 10px;">
-                {ai_rep_active.stance_tr} &nbsp;|&nbsp; <span style="color:#94A3B8; font-weight:500;">{ai_badge_txt}</span>
-            </span>
+    <div style="background:linear-gradient(180deg, #111827 0%, #0B1220 100%); border:1px solid #1E293B; border-left:5px solid {u_col}; border-radius:12px; padding:16px 20px; margin-bottom:10px; box-shadow:0 4px 16px rgba(0,0,0,0.35);">
+        <div style="font-size:16.5px; font-weight:800; color:{u_col}; margin-bottom:10px;">
+            {html.escape(unified_active.trend_headline_tr)}
         </div>
-        {flow_health_row_html}
-        <div style="font-size:13.4px; color:#E2E8F0; line-height:1.58; margin-bottom:6px;">
-            <b style="color:#38BDF8;">📌 Yönetici &amp; Yön Özeti:</b> {ai_rep_active.executive_summary_tr}
+        <div style="font-size:13.6px; color:#E2E8F0; line-height:1.78;">
+            <div><span style="color:#94A3B8;">{html.escape(unified_active.trend_breakout_label_tr)} =</span> <b style="color:#38BDF8;">{html.escape(unified_active.trend_breakout_value_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Destek =</span> <b style="color:#34D399;">{html.escape(unified_active.support_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Güçlü destek =</span> <b style="color:#00E676;">{html.escape(unified_active.strong_support_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Direnç =</span> <b style="color:#FB7185;">{html.escape(unified_active.resistance_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Güçlü Direnç =</span> <b style="color:#FF5252;">{html.escape(unified_active.strong_resistance_tr)}</b></div>
         </div>
-        <div style="font-size:13.4px; color:#FDE68A; line-height:1.58; margin-bottom:6px;">
-            <b style="color:#F59E0B;">⚖️ Çelişki &amp; Tuzak Denetimi:</b> {ai_rep_active.contradiction_comment_tr}
+        <div style="border-top:1px solid #1E293B; margin:10px 0; padding-top:10px; font-size:13.5px; color:#E2E8F0; line-height:1.78;">
+            <div><span style="color:#94A3B8;">Coinin para giriş çıkış seviyeleri =</span> <b>{html.escape(unified_active.money_flow_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Likiditasyon seviyeleri =</span> <b>{html.escape(unified_active.liquidation_levels_tr)}</b></div>
+            <div><span style="color:#94A3B8;">Önce almasını beklediğin likiditasyon seviyesi/olasılık =</span> <b style="color:{u_liq_col};">{html.escape(unified_active.expected_first_liq_tr)}</b></div>
         </div>
-        <div style="font-size:13px; color:#93C5FD; line-height:1.55;">
-            <b style="color:#60A5FA;">🎯 Koşullu İzleme Planı:</b> {ai_rep_active.action_plan_tr}
+        <div style="border-top:1px solid #1E293B; margin-top:10px; padding-top:10px; font-size:13.6px; color:#F1F5F9; line-height:1.68;">
+            <div><b style="color:#38BDF8;">Teknik ne diyor ?</b> <b>{html.escape(unified_active.technical_verdict_tr)}</b></div>
+            <div style="margin-top:4px; color:#CBD5E1;"><b style="color:#94A3B8;">Açıklama:</b> {html.escape(unified_active.explanation_tr)}</div>
         </div>
-        {tensions_html}
     </div>
     """,
     unsafe_allow_html=True,
 )
-ai_b1, ai_b2, _ = st.columns([1.2, 1.5, 3.3])
-with ai_b1:
-    if st.button("🔄 Yön Sentezini Yenile", key=f"btn_ai_ref_{active_symbol}_{active_tf}", use_container_width=True):
-        st.session_state[force_ai_key] = True
-        st.rerun()
-with ai_b2:
-    if st.button("📲 Yön Sentezini Telegram'a Gönder", key=f"btn_ai_tg_{active_symbol}_{active_tf}", use_container_width=True):
-        ok_aitg, msg_aitg = send_telegram_message(
+
+ua_b1, ua_b2, _ = st.columns([1.4, 1.4, 3.2])
+with ua_b1:
+    if st.button("📲 Analizi Telegram'a Gönder", key=f"btn_ua_tg_{active_symbol}_{active_tf}", use_container_width=True):
+        ok_utg, msg_utg = send_telegram_message(
             tg_token_input,
             tg_chat_input,
-            format_ai_summary_telegram_html(ai_rep_active, current_price=last_price),
-            reply_markup=build_ai_summary_inline_keyboard(active_symbol, active_tf),
+            format_unified_analysis_telegram_html(unified_active),
+            reply_markup=build_analysis_inline_keyboard(active_symbol, active_tf),
         )
-        if ok_aitg:
-            st.success(msg_aitg)
+        if ok_utg:
+            st.success(msg_utg)
         else:
-            st.warning(msg_aitg)
+            st.warning(msg_utg)
+with ua_b2:
+    with st.popover("📋 Düz Metin (Kopyala)", use_container_width=True):
+        st.code(unified_active.plain_text_tr, language=None)
 
-# ---------------------------------------------------------------------------
-# 2. 4 CONCISE, READABLE & JARGON-FREE CARDS (TREND, S/R, MONEY FLOW, MAGNETS)
-# ---------------------------------------------------------------------------
-ema20_val = float(last_row.get("ema_20", last_price))
-ema50_val = float(last_row.get("ema_50", last_price))
-sup_val = fc_active.nearest_support
-res_val = fc_active.nearest_resistance
-sup2_val = fc_active.support_levels[1].price if len(fc_active.support_levels) > 1 else None
-res2_val = fc_active.resistance_levels[1].price if len(fc_active.resistance_levels) > 1 else None
-
-tp1_disp = fc_active.tp1_price if fc_active.tp1_price > 0 else fc_active.bullish_target_price
-tp2_disp = fc_active.tp2_price if fc_active.tp2_price > 0 else fc_active.bullish_target_price
-stop_disp = fc_active.stop_price if fc_active.stop_price > 0 else fc_active.bearish_invalidation_price
-is_bear_target = (tp2_disp < last_price) or (fc_active.score < 0)
-dir_label_tr = "Düşüş Hedefi" if is_bear_target else "Yükseliş Hedefi"
-
-# Plain-language breakout & structure summary
-smc_act = fc_active.smc
-if smc_act and smc_act.structure_events:
-    last_ev = smc_act.structure_events[-1]
-    if "BULL_BOS" in last_ev.event_type or "BULL_CHOCH" in last_ev.event_type:
-        breakout_text = f"🟢 Yukarı Trend Kırılımı ({price_fmt(last_ev.price)} aşımı)"
-    elif "BEAR_BOS" in last_ev.event_type or "BEAR_CHOCH" in last_ev.event_type:
-        breakout_text = f"🔴 Aşağı Trend Kırılımı ({price_fmt(last_ev.price)} kırılımı)"
-    elif "BULL_SWEEP" in last_ev.event_type:
-        breakout_text = f"🟢 Dip Tuzak / Stop Avı ({price_fmt(last_ev.price)} — Dönüş İzi)"
-    elif "BEAR_SWEEP" in last_ev.event_type:
-        breakout_text = f"⚠️ Tepe Tuzak / Stop Avı ({price_fmt(last_ev.price)} — Satış İzi)"
-    else:
-        breakout_text = "Belirgin kırılım yok"
-else:
-    breakout_text = "Henüz yeni kırılım yok"
-
-sq_pct = fc_active.squeeze_energy_pct
-if sq_pct >= 68:
-    squeeze_short = f"💥 Yüksek Sıkışma (%{sq_pct:.0f}) — ±%{fc_active.expected_breakout_move_pct:.1f} sert kırılım yakın!"
-elif fc_active.choppiness_index >= 60:
-    squeeze_short = f"⚖️ Yatay Sıkışma (%{sq_pct:.0f}) — Kırılım yönü beklenmeli"
-else:
-    squeeze_short = f"🌊 Akıcı Hareket (Beklenen Dalga: ±%{fc_active.expected_breakout_move_pct:.1f})"
-
-if res_val and res_val > last_price:
-    up_break_price = res_val
-elif ema20_val > last_price:
-    up_break_price = ema20_val
-else:
-    up_break_price = last_price * 1.008
-
-if sup_val and sup_val < last_price:
-    down_break_price = sup_val
-elif ema20_val < last_price:
-    down_break_price = ema20_val
-else:
-    down_break_price = last_price * 0.992
-
-# Money flow plain summary
-cmf_v = float(last_row.get("cmf", 0.0))
-net_delta_20 = float(df_active["net_money_delta_usd"].tail(20).sum())
-wh_score = fc_active.whale_accumulation_score
-
-if abs(net_delta_20) >= 1_000_000:
-    delta_fmt_str = f"{net_delta_20 / 1_000_000:+,.1f} Milyon USDT"
-elif abs(net_delta_20) >= 1_000:
-    delta_fmt_str = f"{net_delta_20 / 1_000:+,.1f} Bin USDT"
-else:
-    delta_fmt_str = f"{net_delta_20:+,.0f} USDT"
-
-if cmf_v > 0.04:
-    mf_col = "#00E676"
-    mf_headline = "🟢 Net Para Girişi Var"
-elif cmf_v < -0.04:
-    mf_col = "#FF5252"
-    mf_headline = "🔴 Net Para Çıkışı Var"
-else:
-    mf_col = "#FACC15"
-    mf_headline = "⚪ Para Akışı Dengeli"
-
-if wh_score >= 60:
-    whale_short = f"🟢 Balinalar Topluyor ({wh_score:.0f}/100)"
-elif wh_score <= 40:
-    whale_short = f"🔴 Balinalar Satıyor ({wh_score:.0f}/100)"
-else:
-    whale_short = f"⚪ Balinalar Dengede ({wh_score:.0f}/100)"
-
-# Liquidation levels plain summary
-short_liq_str = "Yok"
-long_liq_str = "Yok"
-if smc_act and smc_act.liquidation_pools:
-    for p in smc_act.liquidation_pools:
-        if p.pool_type == "SHORT_LIQ":
-            short_liq_str = f"<b style='color:#C084FC;'>{price_fmt(p.price)}</b> <span style='color:#94A3B8;'>(+%{p.distance_pct:.1f})</span>"
-        elif p.pool_type == "LONG_LIQ":
-            long_liq_str = f"<b style='color:#FB923C;'>{price_fmt(p.price)}</b> <span style='color:#94A3B8;'>(-%{p.distance_pct:.1f})</span>"
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    tl_rep = getattr(fc_active, "trendlines", None)
-    tl_summary = getattr(tl_rep, "summary_tr", "") if tl_rep else ""
-    sr_act_type = getattr(fc_active, "sr_action_type", "NONE")
-    sr_act_str = getattr(fc_active, "sr_action_status_tr", "")
-    sr_guide_str = getattr(fc_active, "sr_breakout_guide_tr", "")
-    if sr_act_type in ("BULL_SR_BREAKOUT", "BEAR_SR_BREAKDOWN") and sr_act_str:
-        brk_color = "#10B981" if sr_act_type == "BULL_SR_BREAKOUT" else "#EF4444"
-        breakout_line_html = f"• <b>Kırılım Durumu:</b> <b style='color:{brk_color};'>{sr_act_str}</b>"
-    elif sr_act_type != "NONE" and sr_act_str:
-        breakout_line_html = f"• <b>Seviye Onayı / Tuzak:</b> <b style='color:#38BDF8;'>{sr_act_str}</b>"
-    else:
-        breakout_line_html = f"• <b>Kırılım İzi:</b> {breakout_text}"
-    candle_line_html = f"• 🕯️ <b>Mum Anatomisi:</b> {candle_anat_act}<br>" if candle_anat_act else ""
-    tl_line_html = f"• 📐 <b>Tepe/Dip & Kanal:</b> <b>{swing_struct_act}</b>{f' · {tl_summary}' if tl_summary else ''}<br>"
-    guide_line_html = (
-        f"• <b>🎯 Kırılım Özeti:</b> <span style='color:#E2E8F0;'>{sr_guide_str}</span>"
-        if sr_guide_str
-        else f"• <b>Yukarı / Aşağı Eşik:</b> <b style='color:#00E676;'>{price_fmt(up_break_price)}</b> üstü / <b style='color:#FF5252;'>{price_fmt(down_break_price)}</b> altı"
-    )
-    st.markdown(
-        f"""
-        <div class="kpi-card" style="border-top: 4px solid {score_col};">
-            <div class="kpi-title">1️⃣ TREND, YAPI & MUM ANATOMİSİ ({active_tf})</div>
-            <div class="kpi-value" style="color:{score_col};">{main_trend_title}</div>
-            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
-                {tl_line_html}{candle_line_html}{breakout_line_html}<br>
-                • <b>Sıkışma Durumu:</b> {squeeze_short}<br>
-                {guide_line_html}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c2:
-    sup1_tier = getattr(fc_active, "nearest_support_tier_tr", "🟢 Sıradan Destek")
-    sup1_score = getattr(fc_active, "nearest_support_score", 0.0)
-    sup1_reason = getattr(fc_active, "nearest_support_reason_tr", "")
-    res1_tier = getattr(fc_active, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
-    res1_score = getattr(fc_active, "nearest_resistance_score", 0.0)
-    res1_reason = getattr(fc_active, "nearest_resistance_reason_tr", "")
-
-    s1_stats = getattr(fc_active.support_levels[0], "stats_summary_tr", "") if fc_active.support_levels else ""
-    r1_stats = getattr(fc_active.resistance_levels[0], "stats_summary_tr", "") if fc_active.resistance_levels else ""
-    s1_htf = " · 🏛️ Üst Periyot Duvarı" if (fc_active.support_levels and getattr(fc_active.support_levels[0], "htf_confirmed", False) and "Üst Periyot" not in sup1_reason) else ""
-    r1_htf = " · 🏛️ Üst Periyot Duvarı" if (fc_active.resistance_levels and getattr(fc_active.resistance_levels[0], "htf_confirmed", False) and "Üst Periyot" not in res1_reason) else ""
-
-    sup1_badge = f" <span style='color:#94A3B8; font-size:11px;'>({sup1_score:.0f}/100{f' · {sup1_reason}' if sup1_reason else ''}{s1_htf}{f' · {s1_stats}' if s1_stats else ''})</span>" if sup1_score > 0 else ""
-    res1_badge = f" <span style='color:#94A3B8; font-size:11px;'>({res1_score:.0f}/100{f' · {res1_reason}' if res1_reason else ''}{r1_htf}{f' · {r1_stats}' if r1_stats else ''})</span>" if res1_score > 0 else ""
-
-    if len(fc_active.support_levels) > 1:
-        s2_obj = fc_active.support_levels[1]
-        s2_tier = getattr(s2_obj, "tier_tr", "🟢 Sıradan Destek")
-        s2_sc = getattr(s2_obj, "strength_score", 0.0)
-        s2_st = getattr(s2_obj, "stats_summary_tr", "")
-        sup2_html = f"<br>• <span style='color:#94A3B8;'>2. {s2_tier}:</span> <b style='color:#34D399;'>{price_fmt(s2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({s2_sc:.0f}/100{f' · {s2_st}' if s2_st else ''})</span>"
-    else:
-        sup2_html = ""
-
-    if len(fc_active.resistance_levels) > 1:
-        r2_obj = fc_active.resistance_levels[1]
-        r2_tier = getattr(r2_obj, "tier_tr", "🔴 Sıradan Direnç")
-        r2_sc = getattr(r2_obj, "strength_score", 0.0)
-        r2_st = getattr(r2_obj, "stats_summary_tr", "")
-        res2_html = f"<br>• <span style='color:#94A3B8;'>2. {r2_tier}:</span> <b style='color:#FB7185;'>{price_fmt(r2_obj.price)}</b> <span style='color:#64748B; font-size:11px;'>({r2_sc:.0f}/100{f' · {r2_st}' if r2_st else ''})</span>"
-    else:
-        res2_html = ""
-
-    channel_pct = abs((res_val or last_price) - (sup_val or last_price)) / max(last_price, 1e-9) * 100.0
-    c2_target_line = (
-        f"• 📐 <b>Kanal Genişliği:</b> <b>%{channel_pct:.2f}</b> "
-        f"<span style='color:#94A3B8; font-size:11.5px;'>(Güçlü ≥62p vs Sıradan &lt;62p)</span>"
-    )
-
-    st.markdown(
-        f"""
-        <div class="kpi-card" style="border-top: 4px solid #38BDF8;">
-            <div class="kpi-title">2️⃣ DESTEK & DİRENÇ MİMARİSİ</div>
-            <div class="kpi-value" style="color:#F8FAFC;">Fiyat: {price_fmt(last_price)} <span style="font-size:13px; color:#94A3B8;">USDT</span></div>
-            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
-                • <b>{sup1_tier}:</b> <b style="color:#00E676;">{price_fmt(sup_val)}</b>{sup1_badge}{sup2_html}<br>
-                • <b>{res1_tier}:</b> <b style="color:#FF5252;">{price_fmt(res_val)}</b>{res1_badge}{res2_html}<br>
-                {c2_target_line}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c3:
-    def _fmt_usd_flow(v: Optional[float]) -> str:
-        if v is None or pd.isna(v):
-            return "N/A"
-        if abs(v) >= 1_000_000_000:
-            return f"{v / 1_000_000_000:+,.2f}B$"
-        if abs(v) >= 1_000_000:
-            return f"{v / 1_000_000:+,.1f}M$"
-        if abs(v) >= 1_000:
-            return f"{v / 1_000:+,.1f}K$"
-        return f"{v:+,.0f}$"
-
-    sp_1h = getattr(fc_active, "spot_delta_1h_usd", None)
-    sp_4h = getattr(fc_active, "spot_delta_4h_usd", None)
-    sp_24h = getattr(fc_active, "spot_delta_24h_usd", None)
-    pp_24h = getattr(fc_active, "perp_delta_24h_usd", None)
-    fz_val = getattr(fc_active, "flow_zscore", 0.0)
-    sp_qual = getattr(fc_active, "spot_perp_quality_tr", "")
-    agg_oi = getattr(fc_active, "aggregated_oi_usd", None)
-
-    if sp_24h is not None:
-        flow_row_html = (
-            f"• 💵 <b>Spot Gerçek Nakit (1S / 4S / 24S):</b> "
-            f"<b>{_fmt_usd_flow(sp_1h)}</b> / <b>{_fmt_usd_flow(sp_4h)}</b> / <b>{_fmt_usd_flow(sp_24h)}</b><br>"
-        )
-    else:
-        flow_row_html = f"• 💵 <b>Hacim Tahmini Akış (Proxy):</b> <b>{delta_fmt_str}</b><br>"
-
-    perp_oi_html = ""
-    if pp_24h is not None or agg_oi is not None:
-        p_bits = []
-        if pp_24h is not None:
-            p_bits.append(f"24S Vadeli Taker: <b>{_fmt_usd_flow(pp_24h)}</b>")
-        if agg_oi is not None and agg_oi > 0:
-            p_bits.append(f"Küresel OI: <b>{_fmt_usd_flow(agg_oi).lstrip('+')}</b>")
-        perp_oi_html = f"• ⚡ {' | '.join(p_bits)}<br>"
-
-    qual_html = f"• 🧪 <b>Akış Kalitesi:</b> {sp_qual}<br>" if sp_qual else ""
-    spoof_short = "⚠️ Spoof Temizlendi" if getattr(order_flow, "spoof_cancelled_pct", 0.0) >= 18.0 else "✅ Kalıcı Derinlik"
-
-    st.markdown(
-        f"""
-        <div class="kpi-card" style="border-top: 4px solid {mf_col};">
-            <div class="kpi-title">3️⃣ GERÇEK NAKİT GİRİŞ/ÇIKIŞI (1S/4S/24S) & BALİNA</div>
-            <div class="kpi-value" style="color:{mf_col};">{mf_headline} <span style="font-size:13px; color:#94A3B8;">({fz_val:+.2f}σ)</span></div>
-            <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
-                {flow_row_html}{perp_oi_html}{qual_html}• 🐋 <b>Balina:</b> {whale_short}<br>
-                • 📘 <b>Emir Defteri ({spoof_short}):</b> <b>%{order_flow.imbalance_pct:.0f} Alış</b> (<b style="color:#00E676;">{price_fmt(order_flow.strongest_bid_wall)}</b> / <b style="color:#FF5252;">{price_fmt(order_flow.strongest_ask_wall)}</b>)
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with c4:
-    poc_dist_pct = abs(fc_active.poc_price - last_price) / max(last_price, 1e-9) * 100.0
-    if last_price >= fc_active.poc_price:
-        poc_relation = f"🟢 Fiyat, mıknatısın üstünde (+%{poc_dist_pct:.1f} — Destek)"
-    else:
-        poc_relation = f"🟡 Mıknatıs yukarıda (+%{poc_dist_pct:.1f} çekim bölgesi)"
-    st.markdown(
-        f"""
-        <div class="kpi-card" style="border-top: 4px solid #A855F7;">
-            <div class="kpi-title">4️⃣ MIKNATIS (POC) & TASFİYE BÖLGELERİ</div>
-            <div class="kpi-value" style="color:#FACC15;">🧲 Mıknatıs: {price_fmt(fc_active.poc_price)}</div>
-            <div class="kpi-sub" style="line-height:1.65; margin-top:8px;">
-                • 🟡 <b>En Yoğun Fiyat (POC):</b> {poc_relation}<br>
-                • ⚓ <b>Dip Alıcı Maliyeti (AVWAP):</b> <b>{price_fmt(fc_active.avwap_low_price)}</b><br>
-                • ⬆️ <b>Tahmini Short Tasfiye (25x-50x):</b> {short_liq_str}<br>
-                • ⬇️ <b>Tahmini Long Tasfiye (25x-50x):</b> {long_liq_str}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-# ---------------------------------------------------------------------------
-# 2.5 DEDICATED PERPETUAL FUTURES (VADELİ İŞLEMLER) RADAR & SETUP ENGINE
-# ---------------------------------------------------------------------------
 fut_active = getattr(fc_active, "futures_setup", None)
-if fut_active is not None:
-    fut_hdr_col1, fut_hdr_col2 = st.columns([3.7, 1.3])
-    with fut_hdr_col1:
-        if fut_active.is_tradeable:
-            fut_badge_col = "#00E676" if fut_active.direction == "LONG" else "#FF5252"
-            fut_badge_bg = "rgba(0, 230, 118, 0.10)" if fut_active.direction == "LONG" else "rgba(255, 82, 82, 0.10)"
-            fut_icon = "🟢 LONG (YÜKSELİŞ İŞLEMİ)" if fut_active.direction == "LONG" else "🔴 SHORT (DÜŞÜŞ İŞLEMİ)"
-            st.markdown(
-                f"""
-                <div style="background:{fut_badge_bg}; border:1px solid {fut_badge_col}; border-left:5px solid {fut_badge_col}; border-radius:10px; padding:10px 16px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <div>
-                        <span style="font-size:0.82rem; color:#94A3B8; font-weight:700; letter-spacing:0.04em;">⚡ VADELİ İŞLEMLER (FUTURES) YÖN TAHMİN & SEVİYE RADARI ({active_symbol} - {active_tf})</span><br>
-                        <span style="font-size:1.15rem; font-weight:800; color:{fut_badge_col};">{fut_icon}</span>
-                        <span style="font-size:0.92rem; color:#E2E8F0; margin-left:8px;">— {fut_active.confidence_verdict_tr}</span>
-                    </div>
-                    <div style="background:#0F172A; border:1px solid {fut_badge_col}; border-radius:8px; padding:6px 14px; text-align:right;">
-                        <span style="font-size:0.76rem; color:#94A3B8; display:block;">VADELİ GÜVEN NOTU</span>
-                        <span style="font-size:1.1rem; font-weight:800; color:{fut_badge_col};">{fut_active.confidence_score:.0f}/100 ({fut_active.confidence_grade} Kalite)</span>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"""
-                <div style="background:rgba(245, 158, 11, 0.10); border:1px solid #F59E0B; border-left:5px solid #EF4444; border-radius:10px; padding:10px 16px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <div>
-                        <span style="font-size:0.82rem; color:#FCD34D; font-weight:700; letter-spacing:0.04em;">⚡ VADELİ İŞLEMLER (FUTURES) RİSK KALKANI & GÜVEN RADARI ({active_symbol} - {active_tf})</span><br>
-                        <span style="font-size:1.12rem; font-weight:800; color:#EF4444;">⛔ VADELİ İŞLEM TAVSİYE EDİLMEZ (RİSK YÜKSEK / TEKNİK YAPI UYGUN DEĞİL)</span>
-                    </div>
-                    <div style="background:#0F172A; border:1px solid #EF4444; border-radius:8px; padding:6px 14px; text-align:right;">
-                        <span style="font-size:0.76rem; color:#94A3B8; display:block;">VADELİ GÜVEN NOTU</span>
-                        <span style="font-size:1.1rem; font-weight:800; color:#F59E0B;">{fut_active.confidence_score:.0f}/100 ({fut_active.confidence_grade} — Riskli)</span>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    with fut_hdr_col2:
-        if st.button(f"⚡ {active_symbol} ({active_tf}) Vadeli Planı Telegram'a Gönder", use_container_width=True):
-            mtf_scores_fut = {k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts}
-            fut_msg_html = format_futures_setup_telegram_html(
-                fc=fc_active,
-                symbol=active_symbol,
-                timeframe=active_tf,
-                current_price=last_price,
-                mtf_scores=mtf_scores_fut,
-            )
-            fut_kb = build_futures_setup_inline_keyboard(active_symbol, active_tf)
-            fut_png = generate_telegram_chart_png(
-                df_active,
-                fc_active,
-                active_symbol,
-                active_tf,
-                include_futures_levels=True,
-            )
-            if fut_png:
-                ok_ftg, msg_ftg = send_telegram_photo(
-                    tg_token_input,
-                    tg_chat_input,
-                    fut_png,
-                    caption_html=fut_msg_html,
-                    reply_markup=fut_kb,
-                )
-            else:
-                ok_ftg, msg_ftg = send_telegram_message(
-                    tg_token_input,
-                    tg_chat_input,
-                    fut_msg_html,
-                    reply_markup=fut_kb,
-                )
-            if ok_ftg:
-                st.success("✅ Vadeli İşlem Planı ve Grafiği Telegram'a gönderildi!")
-            else:
-                st.warning(msg_ftg)
-        if st.button(f"🐦 {active_symbol} ({active_tf}) Vadeli Planı X'te Paylaş", use_container_width=True):
-            fut_tweets_x = format_futures_setup_x_post(
-                fc=fc_active,
-                symbol=active_symbol,
-                timeframe=active_tf,
-                current_price=last_price,
-            )
-            fut_png_x = generate_telegram_chart_png(
-                df_active,
-                fc_active,
-                active_symbol,
-                active_tf,
-                include_futures_levels=True,
-            )
-            ok_fx, msg_fx, _ = publish_x_content(
-                tweets=fut_tweets_x,
-                photo_bytes=fut_png_x,
-                title=f"{active_symbol} ({active_tf}) Vadeli Planı",
-                symbol=active_symbol,
-            )
-            if ok_fx:
-                st.success(msg_fx)
-            else:
-                st.info(msg_fx)
-
-    if fut_active.is_tradeable:
-        fc_f1, fc_f2, fc_f3 = st.columns(3)
-        dir_color = "#00E676" if fut_active.direction == "LONG" else "#FF5252"
-        dir_title = "🟢 LONG (YÜKSELİŞ)" if fut_active.direction == "LONG" else "🔴 SHORT (DÜŞÜŞ)"
-        with fc_f1:
-            st.markdown(
-                f"""
-                <div class="kpi-card" style="border-top: 3px solid {dir_color};">
-                    <div class="kpi-title">🎯 1. İŞLEM YÖNÜ, GİRİŞ YERİ & KALDIRAÇ</div>
-                    <div class="kpi-value" style="color:{dir_color}; font-size:1.18rem;">{dir_title} | Giriş: {price_fmt(fut_active.entry_price)}</div>
-                    <div class="kpi-sub" style="line-height:1.68; margin-top:8px;">
-                        • 🧭 <b>Giriş Stratejisi:</b> <b>{fut_active.entry_type_tr}</b><br>
-                        • 📍 <b>Kademeli Giriş Bölgesi:</b> <b>{price_fmt(fut_active.entry_zone_low)} – {price_fmt(fut_active.entry_zone_high)} USDT</b><br>
-                        • 🛡️ <b>Vadeli Güven Notu:</b> <b style="color:{dir_color};">{fut_active.confidence_score:.0f}/100 ({fut_active.confidence_grade})</b><br>
-                        • ⚙️ <b>Önerilen Maks. Kaldıraç:</b> <b>{fut_active.max_safe_leverage}x (İzole)</b><br>
-                        • 🧱 <b>Destek/Direnç Gözetimi:</b> {fut_active.sr_context_tr}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with fc_f2:
-            st.markdown(
-                f"""
-                <div class="kpi-card" style="border-top: 3px solid #38BDF8;">
-                    <div class="kpi-title">🏁 2. KAR AL (TP1 / TP2 / TP3) & STOP YERİ</div>
-                    <div class="kpi-value" style="color:#38BDF8; font-size:1.18rem;">⚖️ R:R Oranı: 1 : {fut_active.rr_ratio:.2f}</div>
-                    <div class="kpi-sub" style="line-height:1.68; margin-top:8px;">
-                        • 🎯 <b>1. Kâr Al (TP1 - %40 Kapat):</b> <b style="color:#00E676;">{price_fmt(fut_active.tp1_price)} USDT</b> (%{fut_active.tp1_distance_pct:.2f} — <i>Stop'u Girişe Çek</i>)<br>
-                        • 🎯 <b>2. Ana Hedef (TP2 - %40 Kapat):</b> <b style="color:#00E676;">{price_fmt(fut_active.tp2_price)} USDT</b> (%{fut_active.tp2_distance_pct:.2f})<br>
-                        • 🚀 <b>3. Uzatılmış Hedef (TP3 - %20):</b> <b style="color:#38BDF8;">{price_fmt(fut_active.tp3_price)} USDT</b> (%{fut_active.tp3_distance_pct:.2f})<br>
-                        • 🛑 <b>Zarar-Kes (Stop-Loss Yeri):</b> <b style="color:#FF5252;">{price_fmt(fut_active.stop_price)} USDT</b> (%{fut_active.stop_distance_pct:.2f} — <i>İğne Korumalı</i>)<br>
-                        • ⏳ <b>Takip Notu:</b> {fut_active.wait_condition_tr}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with fc_f3:
-            lev_sq_str = getattr(fut_active, "leverage_squeeze_status_tr", "") or getattr(fc_active, "leverage_squeeze_status_tr", "")
-            lev_sq_html = f"• ⚡ <b>Kaldıraç Sıkıştırma:</b> <b style='color:#38BDF8;'>{lev_sq_str}</b><br>" if lev_sq_str else ""
-            fluences_html = "<br>".join([f"• ✅ {item}" for item in fut_active.positive_factors_tr[:4]])
-            warnings_html = (
-                "<br>".join([f"• ⚠️ {w}" for w in fut_active.risk_warnings_tr[:2]])
-                if fut_active.risk_warnings_tr
-                else "• ✅ Kritik bir mikro-yapı veya sıkışma engeli tespit edilmedi."
-            )
-            st.markdown(
-                f"""
-                <div class="kpi-card" style="border-top: 3px solid #A855F7;">
-                    <div class="kpi-title">🔬 3. VADELİ TEKNİK ONAYLAR & FONLAMA/OI</div>
-                    <div class="kpi-value" style="color:#FACC15; font-size:1.05rem;">📊 {fut_active.futures_tech_summary_tr.split('|')[0]}</div>
-                    <div class="kpi-sub" style="line-height:1.62; margin-top:8px;">
-                        {lev_sq_html}{fluences_html}<br>
-                        {warnings_html}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        reasons_html = "<br>".join([f"• ❌ <b>{w}</b>" for w in fut_active.risk_warnings_tr[:5]])
-        pos_notes_html = (
-            "<br>".join([f"• 🔹 {f_item}" for f_item in fut_active.positive_factors_tr[:3]])
-            if fut_active.positive_factors_tr
-            else "• 🔹 Henüz yeterli vadeli işlem onayı oluşmadı."
-        )
-        st.markdown(
-            f"""
-            <div class="kpi-card" style="border-top: 3px solid #EF4444; background: linear-gradient(180deg, rgba(239,68,68,0.07) 0%, rgba(17,24,39,0.95) 100%);">
-                <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:space-between;">
-                    <div style="flex:1.4; min-width:280px;">
-                        <div class="kpi-title" style="color:#FCA5A5;">🚨 NEDEN ŞU AN VADELİ İŞLEM ÖNERİLMİYOR? (RİSK ANALİZİ)</div>
-                        <div class="kpi-sub" style="line-height:1.72; margin-top:6px; color:#E2E8F0;">
-                            <i>Vadeli İşlem Radarı; destek/direnç sıkışması, testere piyasası veya yetersiz kazanç/risk (R:R) gördüğünde sermayenizi korumak için <b>Giriş, TP ve Stop seviyesi vermez</b>:</i><br>
-                            {reasons_html}<br>
-                            • 🧱 <b>Destek/Direnç Durumu:</b> {fut_active.sr_context_tr}
-                        </div>
-                    </div>
-                    <div style="flex:1; min-width:260px; border-left:1px solid #334155; padding-left:16px;">
-                        <div class="kpi-title" style="color:#FCD34D;">⏳ NE ZAMAN İŞLEME GİRİLEBİLİR? (RADAR BEKLEME ŞARTI)</div>
-                        <div class="kpi-sub" style="line-height:1.72; margin-top:6px;">
-                            • 🎯 <b>Beklenen Kırılım / Onay:</b> <b style="color:#38BDF8;">{fut_active.wait_condition_tr}</b><br>
-                            • 📊 <b>Vadeli Mikro-Yapı:</b> {fut_active.futures_tech_summary_tr}<br>
-                            {pos_notes_html}
-                        </div>
-                    </div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # 3. CLEAN CHART PRESET BAR + OPTIONAL EXPANDER FOR ADVANCED SETTINGS/DETAILS
@@ -2176,7 +1668,7 @@ with st.expander("➕ Gelişmiş Detaylar: Tekil Çizgi Ayarları, 5 Kriterli On
         show_kalman_avwap = st.checkbox("⚓ Dip/Tepe Maliyet & Erken Trend", value=(is_sr_focus or is_all), key=f"kav_{preset_mode}")
         show_vpvr = st.checkbox("📊 Yatay Hacim Barları (VPVR)", value=(is_sr_focus or is_all), key=f"vpvr_{preset_mode}")
     with chk_c3:
-        show_liq_pools = st.checkbox("🧲 Tahmini Tasfiye Mıknatısları", value=(is_smc_focus or is_all), key=f"liq_{preset_mode}")
+        show_liq_pools = st.checkbox("🧲 Likidasyon Seviyeleri (Canlı Veri)", value=(is_clean or is_smc_focus or is_all), key=f"liq_{preset_mode}")
         show_smc = st.checkbox("🏦 Balina Emir Kutuları (OB/FVG)", value=(is_smc_focus or is_all), key=f"smc_{preset_mode}")
         show_prob_cone = st.checkbox("🔮 Olasılık Yelpazesi (%68)", value=(is_smc_focus or is_all), key=f"cone_{preset_mode}")
     with chk_c4:
@@ -2188,6 +1680,17 @@ with st.expander("➕ Gelişmiş Detaylar: Tekil Çizgi Ayarları, 5 Kriterli On
     st.markdown("---")
     adv_col1, adv_col2 = st.columns([3, 2])
     with adv_col1:
+        if fut_active is not None:
+            if fut_active.is_tradeable:
+                st.markdown(
+                    f"**⚡ Vadeli İşlem Planı ({fut_active.direction} · Güven {fut_active.confidence_score:.0f}/100):** "
+                    f"Giriş `{price_fmt(fut_active.entry_price)}` | Stop `{price_fmt(fut_active.stop_price)}` | "
+                    f"TP1 `{price_fmt(fut_active.tp1_price)}` | TP2 `{price_fmt(fut_active.tp2_price)}` | R:R `1:{fut_active.rr_ratio:.2f}`"
+                )
+            else:
+                st.markdown(
+                    f"**⚡ Vadeli İşlem Durumu:** İşlem önerilmiyor ({fut_active.confidence_score:.0f}/100) — {fut_active.wait_condition_tr}"
+                )
         st.markdown(f"**🚦 5 Kriterli İşlem Hazırlık Kontrolü ({fc_active.readiness_score_5}/5 Onay):**")
         for c_title, c_ok, c_desc in fc_active.readiness_checks:
             st.markdown(f"{'✅' if c_ok else '❌'} **{c_title}:** {c_desc}")

@@ -947,6 +947,104 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
         kb_ai = build_ai_summary_inline_keyboard("ETH/USDT", "4H")
         self.assertEqual(len(kb_ai["inline_keyboard"]), 3)
 
+    def test_real_liquidation_map_and_unified_coin_analysis(self) -> None:
+        from src.data_fetcher import OrderFlowIntel, build_liquidation_map_from_exchange_data
+        from src.local_ai import build_unified_coin_analysis, format_unified_analysis_telegram_html
+
+        # Build synthetic 24h exchange OI + klines + top trader position ratio series
+        base_ts = 1_795_000_000_000
+        hr_ms = 3_600_000
+        klines = []
+        oi_hist = []
+        pos_ratios = []
+        p = 100.0
+        oi = 20_000_000.0
+        for i in range(24):
+            ts = base_ts + i * hr_ms
+            hi = p + 0.6
+            lo = p - 0.6
+            cl = p + (0.1 if i % 2 == 0 else -0.1)
+            klines.append([ts, p, hi, lo, cl, 1000.0, ts + hr_ms - 1, 100_000.0])
+            oi += 400_000.0 if i % 3 != 0 else -100_000.0
+            oi_hist.append({"timestamp": ts, "sumOpenInterestValue": str(oi)})
+            pos_ratios.append({"timestamp": ts, "longAccount": "0.62", "shortAccount": "0.38"})
+
+        liq_map = build_liquidation_map_from_exchange_data(
+            current_price=100.0,
+            oi_hist=oi_hist,
+            futures_klines=klines,
+            pos_ratios=pos_ratios,
+            global_oi_scale=1.5,
+            executed_long_liq_24h_usd=350_000.0,
+            executed_short_liq_24h_usd=120_000.0,
+            executed_liq_count_24h=18,
+            executed_sources=["OKX"],
+        )
+        self.assertTrue(liq_map.is_real_data)
+        self.assertTrue(len(liq_map.short_clusters) >= 1)
+        self.assertTrue(len(liq_map.long_clusters) >= 1)
+        self.assertGreater(liq_map.short_clusters[0].price, 100.0)
+        self.assertLess(liq_map.long_clusters[0].price, 100.0)
+        self.assertIn("Binance OI-Profil", liq_map.source_summary)
+        self.assertIn("OKX", liq_map.source_summary)
+
+        # Build unified analysis with real liquidation map attached
+        cfg = AnalysisConfig()
+        df = CryptoDataFetcher.generate_synthetic_ohlcv(limit=260, timeframe="4h")
+        df = TechnicalIndicators(cfg.indicators).enrich(df)
+        df = CandlestickPatternDetector(cfg.patterns).detect_all(df)
+        engine = SignalEngine(cfg.indicators)
+        df = engine.evaluate(df)
+        curr_p = float(df["close"].iloc[-1])
+
+        # Re-anchor liq_map around curr_p
+        for c in liq_map.short_clusters:
+            c.price = curr_p * (1.0 + c.distance_pct / 100.0)
+        for c in liq_map.long_clusters:
+            c.price = curr_p * (1.0 - c.distance_pct / 100.0)
+
+        of = OrderFlowIntel(
+            symbol="ONDO/USDT",
+            exchange="binance",
+            imbalance_pct=46.0,
+            strongest_bid_wall=curr_p * 0.985,
+            strongest_ask_wall=curr_p * 1.015,
+            spot_delta_1h_usd=-25_000.0,
+            spot_delta_4h_usd=-140_000.0,
+            spot_delta_24h_usd=-520_000.0,
+            perp_cvd_delta_24h_usd=-310_000.0,
+            funding_rate_pct=0.008,
+            oi_change_24h_pct=-2.4,
+            long_short_ratio=1.22,
+            liquidation_map=liq_map,
+        )
+        fc = engine.generate_forecast(df, order_flow=of, symbol="ONDO/USDT")
+        unified = build_unified_coin_analysis(
+            symbol="ONDO/USDT",
+            timeframe="4H",
+            df=df,
+            fc=fc,
+            mtf_scores={"15M": -10.0, "1H": -25.0, "4H": fc.score, "1D": -30.0},
+            order_flow=of,
+        )
+
+        self.assertIn("ONDO/4h", unified.plain_text_tr)
+        self.assertIn("Destek =", unified.plain_text_tr)
+        self.assertIn("Güçlü destek =", unified.plain_text_tr)
+        self.assertIn("Direnç =", unified.plain_text_tr)
+        self.assertIn("Güçlü Direnç =", unified.plain_text_tr)
+        self.assertIn("Coinin para giriş çıkış seviyeleri =", unified.plain_text_tr)
+        self.assertIn("Likiditasyon seviyeleri =", unified.plain_text_tr)
+        self.assertIn("Önce almasını beklediğin likiditasyon seviyesi/olasılık =", unified.plain_text_tr)
+        self.assertIn("Teknik ne diyor ?", unified.plain_text_tr)
+        self.assertIn("Açıklama:", unified.plain_text_tr)
+        self.assertGreaterEqual(unified.expected_first_liq_prob_pct, 20)
+        self.assertLessEqual(unified.expected_first_liq_prob_pct, 80)
+
+        tg_html = format_unified_analysis_telegram_html(unified)
+        self.assertIn("Likidasyon Seviyeleri", tg_html)
+        self.assertIn("Teknik ne diyor?", tg_html)
+
 
 if __name__ == "__main__":
     unittest.main()

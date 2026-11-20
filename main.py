@@ -141,59 +141,22 @@ def analyze_coin_multi_timeframe(
     coin_scores = bundle.mtf_scores
     ordered_tfs = [tf.upper() for tf in timeframes]
     anchor_ai_tf = "4H" if "4H" in ordered_tfs else ordered_tfs[0]
-    ai_rep = AnalysisPipeline.attach_ai_summary(bundle, timeframe=anchor_ai_tf, enable_ai=enable_ai)
+    from src.local_ai import build_unified_coin_analysis
 
-    print("\n" + "=" * 106)
-    print(f"  📊 {symbol} — KURUMSAL ÇOK KATMANLI YÖN, PARA SAĞLIĞI, SMC & GERÇEKÇİ BACKTEST RAPORU (v10.0)")
-    print("=" * 106)
-    print(f"  📘 Derin Emir Defteri : {order_flow.orderbook_status_tr}")
-    print(f"  ⚡ Vadeli İşlemler    : {order_flow.futures_sentiment_tr}")
-    if ai_rep is not None:
-        ai_src_tag = (
-            f"Hibrit: Kantitatif + Ollama/{ai_rep.model_used} ({ai_rep.latency_sec:.1f}s | Katkı:{ai_rep.ai_score_delta:+.1f}p)"
-            if ai_rep.is_ai_generated
-            else "Bağımsız Kantitatif Motor v10 (AI Olmadan Tam Kapasite)"
-        )
-        print(f"  🧠 Aktif Yön Motoru   : {ai_rep.stance_tr} [{anchor_ai_tf} · {ai_src_tag}]")
-        if ai_rep.flow_health_tr:
-            print(f"  💧 Para Giriş Sağlığı : {ai_rep.flow_health_tr}")
-        print(f"  📌 Yönetici & Yön Öz. : {ai_rep.executive_summary_tr}")
-        print(f"  ⚖️ Çelişki Denetimi   : {ai_rep.contradiction_comment_tr}")
-        print(f"  🎯 İzleme Planı       : {ai_rep.action_plan_tr}")
-    print("-" * 106)
+    unified_rep = build_unified_coin_analysis(
+        symbol=symbol,
+        timeframe=anchor_ai_tf,
+        df=tf_data[anchor_ai_tf],
+        fc=tf_forecasts[anchor_ai_tf],
+        mtf_scores=coin_scores,
+        order_flow=order_flow,
+    )
 
-    for tf_key in ordered_tfs:
-        df_final = tf_data[tf_key]
-        forecast = tf_forecasts[tf_key]
-        last = df_final.iloc[-1]
-        p_fmt = ",.4f" if float(df_final["close"].max()) < 10.0 else ",.2f"
-        sup_str = (
-            " / ".join([f"{format(s.price, p_fmt)}" for s in forecast.support_levels])
-            if forecast.support_levels
-            else "Yok"
-        )
-        res_str = (
-            " / ".join([f"{format(r.price, p_fmt)}" for r in forecast.resistance_levels])
-            if forecast.resistance_levels
-            else "Yok"
-        )
-
-        print(
-            f"  ⏱️ [{tf_key}] Fiyat: {format(last['close'], p_fmt)} USDT | "
-            f"Hacim POC: {format(forecast.poc_price, p_fmt)} | RSI: {last['rsi']:.1f} | CMF: {last['cmf']:+.2f}"
-        )
-        print(f"     • Yön Endeksi     : {forecast.verdict_tr} (Skor: {forecast.score:+.0f}/100 | Uyum: %{forecast.confidence_pct:.0f})")
-        print(f"     • Dinamik Rejim   : {forecast.regime_tr}")
-        print(f"     • Para Akışı      : {forecast.money_flow_status_tr}")
-        print(f"     • SMC & Likidite  : {forecast.smc.structure_summary_tr} | {forecast.smc.liquidity_summary_tr}")
-        print(f"     • BTC RS & Makro  : {forecast.smc.relative_strength.status_tr} | {forecast.macro_context_tr}")
-        print(f"     • Destek / Direnç : 🟢 {sup_str} USDT  |  🔴 {res_str} USDT")
-        print(f"     • Backtest Özeti  : 🎯 {forecast.backtest_stats.summary_tr}")
-        if forecast.risk_plan:
-            print(f"     • Kasa/Risk Planı : 🧮 {forecast.risk_plan.summary_tr}")
-        print(f"     • Boğa Senaryosu  : {forecast.bullish_scenario_tr}")
-        print(f"     • Ayı Senaryosu   : {forecast.bearish_scenario_tr}")
-        print("-" * 106)
+    print("\n" + "=" * 96)
+    print(f"  📊 {symbol} ({anchor_ai_tf}) [{source_used}] — SADELEŞTİRİLMİŞ TEKNİK & LİKİDASYON ANALİZİ")
+    print("=" * 96)
+    print(unified_rep.plain_text_tr)
+    print("-" * 96)
 
     visualizer = InteractiveChartVisualizer(base_config)
     fig = visualizer.create_multi_timeframe_figure(

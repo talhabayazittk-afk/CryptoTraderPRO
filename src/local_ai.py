@@ -742,3 +742,504 @@ def build_ai_summary_inline_keyboard(symbol: str, active_tf: str = "4H") -> Dict
             ],
         ]
     }
+
+
+@dataclass
+class UnifiedCoinAnalysis:
+    """
+    Single-output, strictly chart- and exchange-data-grounded synthesized coin analysis.
+    Blends Trend, Dynamic Trendlines, Support/Resistance, Real Cash Flow, Real Exchange Liquidation Map,
+    First-Sweep Liquidation Probability, and Technical Verdict with zero fluff or hallucination.
+    """
+    symbol: str
+    timeframe: str
+    current_price: float
+    trend_direction: str               # "UP", "DOWN", "SIDEWAYS"
+    trend_headline_tr: str             # e.g. "ONDO/4H şu an düşen trend yönünde seyrediyor."
+    accent_color: str                  # "#00E676", "#FF5252", "#FACC15"
+    trend_breakout_label_tr: str       # "Düşen trend kırılım seviyesi" / "Yükselen trend kırılım seviyesi" / ...
+    trend_breakout_value_tr: str
+    support_tr: str
+    strong_support_tr: str
+    resistance_tr: str
+    strong_resistance_tr: str
+    money_flow_tr: str
+    liquidation_levels_tr: str
+    expected_first_liq_tr: str
+    expected_first_liq_side: str       # "LONG_LIQ", "SHORT_LIQ", "NONE"
+    expected_first_liq_prob_pct: int
+    technical_verdict_tr: str
+    explanation_tr: str
+    liquidation_source_tr: str
+    plain_text_tr: str
+
+
+def _fmt_usd_compact(val: Optional[float], signed: bool = True) -> str:
+    if val is None:
+        return "Veri yok"
+    v = float(val)
+    if np.isnan(v):
+        return "Veri yok"
+    sign = "+" if (signed and v > 0) else ("-" if v < 0 else "")
+    av = abs(v)
+    if av >= 1_000_000_000:
+        return f"{sign}${av / 1_000_000_000:,.2f}B"
+    if av >= 1_000_000:
+        return f"{sign}${av / 1_000_000:,.2f}M"
+    if av >= 1_000:
+        return f"{sign}${av / 1_000:,.1f}K"
+    return f"{sign}${av:,.0f}"
+
+
+def _fmt_px(val: Optional[float], ref_price: float) -> str:
+    if val is None or val <= 0:
+        return "Belirlenemedi"
+    if ref_price < 0.1:
+        return f"${float(val):,.5f}"
+    if ref_price < 10.0:
+        return f"${float(val):,.4f}"
+    return f"${float(val):,.2f}"
+
+
+def _pct_dist(level: float, ref_price: float) -> float:
+    return ((level - ref_price) / max(ref_price, 1e-9)) * 100.0
+
+
+def build_unified_coin_analysis(
+    symbol: str,
+    timeframe: str,
+    df: Any,
+    fc: MarketForecast,
+    mtf_scores: Dict[str, float],
+    order_flow: Optional[OrderFlowIntel] = None,
+) -> UnifiedCoinAnalysis:
+    """
+    Produces a single, harmonized, strictly factual Turkish technical + cash-flow + liquidation analysis
+    from real OHLCV indicators, S/R levels, order flow, and live exchange liquidation map data.
+    """
+    tf_up = timeframe.upper()
+    tf_disp = tf_up.lower()
+    base_coin = symbol.split("/")[0].upper()
+    last_row = df.iloc[-1] if (df is not None and len(df) > 0) else {}
+    curr_p = float(last_row.get("close", 0.0)) if hasattr(last_row, "get") else 0.0
+    if curr_p <= 0 and fc.nearest_support and fc.nearest_resistance:
+        curr_p = 0.5 * (fc.nearest_support + fc.nearest_resistance)
+
+    ema20 = float(last_row.get("ema_20", curr_p)) if hasattr(last_row, "get") else curr_p
+    ema50 = float(last_row.get("ema_50", curr_p)) if hasattr(last_row, "get") else curr_p
+    ema200 = float(last_row.get("ema_200", 0.0)) if hasattr(last_row, "get") else 0.0
+    rsi14 = float(last_row.get("rsi", 50.0)) if hasattr(last_row, "get") else 50.0
+    adx14 = float(last_row.get("adx", 20.0)) if hasattr(last_row, "get") else 20.0
+    macd_hist = float(last_row.get("macd_hist", 0.0)) if hasattr(last_row, "get") else 0.0
+    cmf_v = float(last_row.get("cmf", 0.0)) if hasattr(last_row, "get") else 0.0
+
+    # 1. Trend Direction (strictly anchored to score, trend_score, EMA alignment)
+    if fc.score >= 15.0 or (fc.trend_score >= 18.0 and curr_p > ema50 and fc.score >= 5.0):
+        trend_dir = "UP"
+        accent_color = "#00E676"
+        trend_headline = f"{base_coin}/{tf_disp} şu an yükselen trend yönünde seyrediyor."
+    elif fc.score <= -15.0 or (fc.trend_score <= -18.0 and curr_p < ema50 and fc.score <= -5.0):
+        trend_dir = "DOWN"
+        accent_color = "#FF5252"
+        trend_headline = f"{base_coin}/{tf_disp} şu an düşen trend yönünde seyrediyor."
+    else:
+        trend_dir = "SIDEWAYS"
+        accent_color = "#FACC15"
+        trend_headline = f"{base_coin}/{tf_disp} şu an yatay / sıkışma bandında seyrediyor."
+
+    # 2. Support / Strong Support / Resistance / Strong Resistance
+    sups = [s for s in (fc.support_levels or []) if s.price < curr_p * 0.999]
+    ress = [r for r in (fc.resistance_levels or []) if r.price > curr_p * 1.001]
+
+    sup_primary = sups[0] if sups else None
+    sup_strong = None
+    if sups:
+        deeper_sups = sups[1:]
+        if deeper_sups:
+            sup_strong = max(
+                deeper_sups,
+                key=lambda s: (
+                    1 if getattr(s, "htf_confirmed", False) else 0,
+                    getattr(s, "strength_score", 0.0),
+                ),
+            )
+        else:
+            sup_strong = sup_primary
+
+    res_primary = ress[0] if ress else None
+    res_strong = None
+    if ress:
+        deeper_ress = ress[1:]
+        if deeper_ress:
+            res_strong = max(
+                deeper_ress,
+                key=lambda r: (
+                    1 if getattr(r, "htf_confirmed", False) else 0,
+                    getattr(r, "strength_score", 0.0),
+                ),
+            )
+        else:
+            res_strong = res_primary
+
+    def _fmt_sr(lvl: Any, fallback_p: Optional[float] = None) -> str:
+        if lvl is not None and lvl.price > 0:
+            d = _pct_dist(lvl.price, curr_p)
+            htf_tag = " · Üst Periyot" if getattr(lvl, "htf_confirmed", False) else ""
+            sc = getattr(lvl, "strength_score", 0.0)
+            sc_tag = f" · Güç {sc:.0f}/100" if sc > 0 else ""
+            return f"{_fmt_px(lvl.price, curr_p)} ({d:+.2f}%{sc_tag}{htf_tag})"
+        if fallback_p and fallback_p > 0:
+            d = _pct_dist(fallback_p, curr_p)
+            return f"{_fmt_px(fallback_p, curr_p)} ({d:+.2f}%)"
+        return "Yakın seviye tespit edilmedi"
+
+    support_tr = _fmt_sr(sup_primary, fc.nearest_support)
+    strong_support_tr = _fmt_sr(sup_strong, sup_primary.price if sup_primary else fc.nearest_support)
+    resistance_tr = _fmt_sr(res_primary, fc.nearest_resistance)
+    strong_resistance_tr = _fmt_sr(res_strong, res_primary.price if res_primary else fc.nearest_resistance)
+
+    # 3. Trend Breakout Level (Dynamic Trendline -> EMA50 -> Structural S/R)
+    tl = getattr(fc, "trendlines", None)
+    breakout_price_num: Optional[float] = None
+    if trend_dir == "DOWN":
+        trend_breakout_label = "Düşen trend kırılım seviyesi"
+        if tl is not None and tl.has_resistance_line and tl.res_current_price > curr_p * 1.001:
+            breakout_price_num = float(tl.res_current_price)
+            bp_basis = "Düşen Trend Çizgisi"
+        elif ema50 > curr_p * 1.002 and ema50 < curr_p * 1.18:
+            breakout_price_num = ema50
+            bp_basis = "EMA50 Kırılımı"
+        elif res_primary is not None:
+            breakout_price_num = float(res_primary.price)
+            bp_basis = "İlk Yapısal Direnç"
+        else:
+            bp_basis = ""
+        if breakout_price_num:
+            trend_breakout_val = f"{_fmt_px(breakout_price_num, curr_p)} ({_pct_dist(breakout_price_num, curr_p):+.2f}% · {bp_basis} üzeri kapanış)"
+        else:
+            trend_breakout_val = "Net kırılım çizgisi yok"
+    elif trend_dir == "UP":
+        trend_breakout_label = "Yükselen trend kırılım seviyesi"
+        if tl is not None and tl.has_support_line and 0 < tl.sup_current_price < curr_p * 0.999:
+            breakout_price_num = float(tl.sup_current_price)
+            bp_basis = "Yükselen Trend Çizgisi"
+        elif 0 < ema50 < curr_p * 0.998 and ema50 > curr_p * 0.82:
+            breakout_price_num = ema50
+            bp_basis = "EMA50 Kırılımı"
+        elif sup_primary is not None:
+            breakout_price_num = float(sup_primary.price)
+            bp_basis = "İlk Yapısal Destek"
+        else:
+            bp_basis = ""
+        if breakout_price_num:
+            trend_breakout_val = f"{_fmt_px(breakout_price_num, curr_p)} ({_pct_dist(breakout_price_num, curr_p):+.2f}% · {bp_basis} altı kapanış)"
+        else:
+            trend_breakout_val = "Net kırılım çizgisi yok"
+    else:
+        trend_breakout_label = "Yatay bant kırılım seviyeleri"
+        up_p = (
+            float(tl.res_current_price)
+            if (tl is not None and tl.has_resistance_line and tl.res_current_price > curr_p * 1.001)
+            else (float(res_primary.price) if res_primary else curr_p * 1.015)
+        )
+        dn_p = (
+            float(tl.sup_current_price)
+            if (tl is not None and tl.has_support_line and 0 < tl.sup_current_price < curr_p * 0.999)
+            else (float(sup_primary.price) if sup_primary else curr_p * 0.985)
+        )
+        trend_breakout_val = (
+            f"Yukarı {_fmt_px(up_p, curr_p)} ({_pct_dist(up_p, curr_p):+.2f}%) | "
+            f"Aşağı {_fmt_px(dn_p, curr_p)} ({_pct_dist(dn_p, curr_p):+.2f}%)"
+        )
+
+    # 4. Real Money Inflow / Outflow & Order-Book Wall Levels
+    sp_1h = getattr(fc, "spot_delta_1h_usd", None)
+    sp_4h = getattr(fc, "spot_delta_4h_usd", None)
+    sp_24h = getattr(fc, "spot_delta_24h_usd", None)
+    pp_24h = getattr(fc, "perp_delta_24h_usd", None)
+    if order_flow is not None:
+        if sp_1h is None:
+            sp_1h = order_flow.spot_delta_1h_usd
+        if sp_4h is None:
+            sp_4h = order_flow.spot_delta_4h_usd
+        if sp_24h is None:
+            sp_24h = order_flow.spot_delta_24h_usd
+        if pp_24h is None:
+            pp_24h = order_flow.perp_cvd_delta_24h_usd
+
+    flow_bits: List[str] = []
+    if sp_24h is not None:
+        flow_bits.append(
+            f"Spot Net Akış (1S / 4S / 24S): {_fmt_usd_compact(sp_1h)} / {_fmt_usd_compact(sp_4h)} / {_fmt_usd_compact(sp_24h)}"
+        )
+    elif df is not None and "net_money_delta_usd" in df.columns:
+        nd20 = float(df["net_money_delta_usd"].tail(20).sum())
+        flow_bits.append(f"Son 20 Mum Net Hacim Akışı: {_fmt_usd_compact(nd20)}")
+
+    if pp_24h is not None:
+        flow_bits.append(f"Vadeli 24S Taker: {_fmt_usd_compact(pp_24h)}")
+
+    if order_flow is not None and order_flow.strongest_bid_wall > 0 and order_flow.strongest_ask_wall > 0:
+        flow_bits.append(
+            f"Alış Duvarı {_fmt_px(order_flow.strongest_bid_wall, curr_p)} / "
+            f"Satış Duvarı {_fmt_px(order_flow.strongest_ask_wall, curr_p)} (Emir Defteri: %{order_flow.imbalance_pct:.0f} Alış)"
+        )
+    money_flow_tr = " · ".join(flow_bits) if flow_bits else f"CMF: {cmf_v:+.2f}"
+
+    # 5. Real Exchange-Backed Liquidation Levels
+    liq_map = getattr(order_flow, "liquidation_map", None) if order_flow is not None else None
+    short_p: Optional[float] = None
+    short_d: Optional[float] = None
+    short_usd: float = 0.0
+    long_p: Optional[float] = None
+    long_d: Optional[float] = None
+    long_usd: float = 0.0
+    liq_parts: List[str] = []
+    liq_source_tr = ""
+
+    if liq_map is not None and liq_map.is_real_data and (liq_map.short_clusters or liq_map.long_clusters):
+        liq_source_tr = liq_map.source_summary or "Binance OI-Profil"
+        if liq_map.short_clusters:
+            sc0 = liq_map.short_clusters[0]
+            short_p, short_d, short_usd = sc0.price, sc0.distance_pct, sc0.estimated_usd
+            s_strs = [
+                f"{_fmt_px(c.price, curr_p)} (+%{c.distance_pct:.2f} · {c.leverage_tag} ~{_fmt_usd_compact(c.estimated_usd, signed=False)})"
+                for c in liq_map.short_clusters[:2]
+            ]
+            liq_parts.append("Short (Yukarı): " + " | ".join(s_strs))
+        if liq_map.long_clusters:
+            lc0 = liq_map.long_clusters[0]
+            long_p, long_d, long_usd = lc0.price, lc0.distance_pct, lc0.estimated_usd
+            l_strs = [
+                f"{_fmt_px(c.price, curr_p)} (-%{c.distance_pct:.2f} · {c.leverage_tag} ~{_fmt_usd_compact(c.estimated_usd, signed=False)})"
+                for c in liq_map.long_clusters[:2]
+            ]
+            liq_parts.append("Long (Aşağı): " + " | ".join(l_strs))
+        if liq_map.executed_liq_count_24h > 0:
+            liq_parts.append(
+                f"24S Gerçek Tasfiye: Long {_fmt_usd_compact(liq_map.executed_long_liq_24h_usd, signed=False)} / "
+                f"Short {_fmt_usd_compact(liq_map.executed_short_liq_24h_usd, signed=False)}"
+            )
+        liquidation_levels_tr = " · ".join(liq_parts) + f" [{liq_source_tr}]"
+    else:
+        # Fallback to SMC swing-derived pools if coin has no futures OI feed
+        liq_source_tr = "Grafik Tahmini (Vadeli OI Yok)"
+        if fc.smc and fc.smc.liquidation_pools:
+            for lp in fc.smc.liquidation_pools:
+                if lp.pool_type == "SHORT_LIQ" and short_p is None:
+                    short_p, short_d, short_usd = lp.price, lp.distance_pct, max(1.0, lp.density_score * 100_000.0)
+                    liq_parts.append(f"Short (Yukarı): {_fmt_px(lp.price, curr_p)} (+%{lp.distance_pct:.2f})")
+                elif lp.pool_type == "LONG_LIQ" and long_p is None:
+                    long_p, long_d, long_usd = lp.price, lp.distance_pct, max(1.0, lp.density_score * 100_000.0)
+                    liq_parts.append(f"Long (Aşağı): {_fmt_px(lp.price, curr_p)} (-%{lp.distance_pct:.2f})")
+        liquidation_levels_tr = (
+            " · ".join(liq_parts) + f" [{liq_source_tr}]"
+            if liq_parts
+            else "Aktif likidasyon kümesi tespit edilmedi."
+        )
+
+    # 6. Expected First Liquidation Sweep & Quantitative Probability
+    # First-passage-time distance ratio + USD cluster gravity + active trend drift + real flow/funding pressure
+    expected_side = "NONE"
+    expected_prob = 50
+    if short_p is not None and long_p is not None and short_d is not None and long_d is not None:
+        d_s = max(short_d, 0.25)
+        d_l = max(long_d, 0.25)
+        p_dist_short = d_l / (d_s + d_l)  # Exact Brownian first-hitting-time probability
+        p_grav_short = (
+            short_usd / (short_usd + long_usd)
+            if (short_usd > 0 and long_usd > 0)
+            else 0.50
+        )
+        trend_shift = float(np.clip(fc.score / 100.0, -1.0, 1.0)) * 0.20
+
+        flow_shift = 0.0
+        if sp_4h is not None:
+            flow_shift += 0.04 if sp_4h > 0 else (-0.04 if sp_4h < 0 else 0.0)
+        fr_val = (
+            order_flow.oi_weighted_funding_pct
+            if (order_flow is not None and order_flow.oi_weighted_funding_pct is not None)
+            else (order_flow.funding_rate_pct if order_flow is not None else None)
+        )
+        if fr_val is not None:
+            if fr_val >= 0.025:
+                flow_shift -= 0.04  # Crowded longs increase downside sweep odds
+            elif fr_val <= -0.01:
+                flow_shift += 0.04  # Crowded shorts increase upside squeeze odds
+
+        prob_short = 0.55 * p_dist_short + 0.15 * p_grav_short + 0.15 + trend_shift + flow_shift
+        prob_short = float(np.clip(prob_short, 0.22, 0.78))
+        prob_long = 1.0 - prob_short
+
+        reasons: List[str] = []
+        if prob_short >= prob_long:
+            expected_side = "SHORT_LIQ"
+            expected_prob = int(round(prob_short * 100))
+            if d_s < d_l:
+                reasons.append("fiyata daha yakın")
+            if fc.score >= 10:
+                reasons.append("yükselen trend yönünde")
+            if short_usd > long_usd * 1.15:
+                reasons.append("likidasyon yoğunluğu daha yüksek")
+            if not reasons:
+                reasons.append("akış ve mesafe dengesi yukarı ağırlıklı")
+            expected_first_liq_tr = (
+                f"Short Likidasyon (Yukarı) — {_fmt_px(short_p, curr_p)} (+%{short_d:.2f}) | "
+                f"Olasılık: %{expected_prob} ({', '.join(reasons)})"
+            )
+        else:
+            expected_side = "LONG_LIQ"
+            expected_prob = int(round(prob_long * 100))
+            if d_l < d_s:
+                reasons.append("fiyata daha yakın")
+            if fc.score <= -10:
+                reasons.append("düşen trend yönünde")
+            if long_usd > short_usd * 1.15:
+                reasons.append("likidasyon yoğunluğu daha yüksek")
+            if not reasons:
+                reasons.append("akış ve mesafe dengesi aşağı ağırlıklı")
+            expected_first_liq_tr = (
+                f"Long Likidasyon (Aşağı) — {_fmt_px(long_p, curr_p)} (-%{long_d:.2f}) | "
+                f"Olasılık: %{expected_prob} ({', '.join(reasons)})"
+            )
+    elif long_p is not None and long_d is not None:
+        expected_side = "LONG_LIQ"
+        expected_prob = 62
+        expected_first_liq_tr = f"Long Likidasyon (Aşağı) — {_fmt_px(long_p, curr_p)} (-%{long_d:.2f}) | Olasılık: %{expected_prob}"
+    elif short_p is not None and short_d is not None:
+        expected_side = "SHORT_LIQ"
+        expected_prob = 62
+        expected_first_liq_tr = f"Short Likidasyon (Yukarı) — {_fmt_px(short_p, curr_p)} (+%{short_d:.2f}) | Olasılık: %{expected_prob}"
+    else:
+        expected_first_liq_tr = "Öncelikli likidasyon hedefi hesaplanamadı."
+
+    # 7. Technical Verdict & Factual Explanation (Zero Fluff, 100% Real Chart Numbers)
+    ema_rel_bits: List[str] = []
+    if ema20 > 0:
+        ema_rel_bits.append(f"EMA20 ({_fmt_px(ema20, curr_p)}) {'üzerinde' if curr_p >= ema20 else 'altında'}")
+    if ema50 > 0:
+        ema_rel_bits.append(f"EMA50 ({_fmt_px(ema50, curr_p)}) {'üzerinde' if curr_p >= ema50 else 'altında'}")
+    if ema200 > 0:
+        ema_rel_bits.append(f"EMA200 ({_fmt_px(ema200, curr_p)}) {'üzerinde' if curr_p >= ema200 else 'altında'}")
+
+    mtf_str = " | ".join(
+        f"{k}: {mtf_scores[k]:+.0f}"
+        for k in ("15M", "1H", "4H", "1D")
+        if k in mtf_scores
+    )
+
+    if rsi14 >= 70:
+        rsi_note = f"RSI {rsi14:.1f} (aşırı alım)"
+    elif rsi14 <= 30:
+        rsi_note = f"RSI {rsi14:.1f} (aşırı satım)"
+    else:
+        rsi_note = f"RSI {rsi14:.1f}"
+    macd_note = "MACD pozitif" if macd_hist > 0 else "MACD negatif"
+    adx_note = f"ADX {adx14:.1f} ({'güçlü trend' if adx14 >= 25 else 'zayıf/yatay momentum'})"
+
+    deriv_bits: List[str] = []
+    if order_flow is not None:
+        fr_disp = order_flow.oi_weighted_funding_pct if order_flow.oi_weighted_funding_pct is not None else order_flow.funding_rate_pct
+        if fr_disp is not None:
+            deriv_bits.append(f"Fonlama %{fr_disp:+.4f}")
+        if order_flow.oi_change_24h_pct is not None:
+            deriv_bits.append(f"24S OI {order_flow.oi_change_24h_pct:+.1f}%")
+        if order_flow.long_short_ratio is not None:
+            deriv_bits.append(f"L/S {order_flow.long_short_ratio:.2f}")
+
+    if trend_dir == "DOWN":
+        verdict = "Satış baskısı baskın; düşen trend kırılımı gelmeden tepki alımları riskli."
+        cond_line = (
+            f"Fiyat {_fmt_px(breakout_price_num, curr_p)} üzerinde kapanış yapmadıkça aşağıda "
+            f"{_fmt_px(sup_primary.price if sup_primary else fc.nearest_support, curr_p)} desteği"
+            + (f" ve {_fmt_px(long_p, curr_p)} long likidasyon bölgesi" if long_p else "")
+            + " öncelikli takip seviyesidir."
+        )
+    elif trend_dir == "UP":
+        verdict = "Alıcı kontrolü sürüyor; yükselen trend desteği korundukça yukarı yapı geçerli."
+        cond_line = (
+            f"Fiyat {_fmt_px(breakout_price_num, curr_p)} üzerinde kaldıkça yukarıda "
+            f"{_fmt_px(res_primary.price if res_primary else fc.nearest_resistance, curr_p)} direnci"
+            + (f" ve {_fmt_px(short_p, curr_p)} short likidasyon bölgesi" if short_p else "")
+            + " hedefte kalır; bu seviye altında kapanış yapıyı zayıflatır."
+        )
+    else:
+        verdict = "Net trend yönü yok; sıkışma bandının kırıldığı yöne göre hareket beklenmeli."
+        cond_line = (
+            f"Yukarıda {_fmt_px(res_primary.price if res_primary else fc.nearest_resistance, curr_p)} üzeri "
+            f"veya aşağıda {_fmt_px(sup_primary.price if sup_primary else fc.nearest_support, curr_p)} altı "
+            f"hacimli mum kapanışı yeni yönü teyit eder."
+        )
+
+    expl_sentences = [
+        f"Fiyat ({_fmt_px(curr_p, curr_p)}) şu an {', '.join(ema_rel_bits)} konumlanıyor." if ema_rel_bits else "",
+        f"Göstergeler: {rsi_note}, {macd_note}, {adx_note}" + (f" | Çoklu zaman skoru ({mtf_str})." if mtf_str else "."),
+        (f"Türev verileri: {', '.join(deriv_bits)}." if deriv_bits else ""),
+        cond_line,
+    ]
+    explanation_tr = " ".join(s for s in expl_sentences if s).strip()
+
+    plain_lines = [
+        trend_headline,
+        f"{trend_breakout_label} = {trend_breakout_val}",
+        f"Destek = {support_tr}",
+        f"Güçlü destek = {strong_support_tr}",
+        f"Direnç = {resistance_tr}",
+        f"Güçlü Direnç = {strong_resistance_tr}",
+        "",
+        f"Coinin para giriş çıkış seviyeleri = {money_flow_tr}",
+        f"Likiditasyon seviyeleri = {liquidation_levels_tr}",
+        f"Önce almasını beklediğin likiditasyon seviyesi/olasılık = {expected_first_liq_tr}",
+        "",
+        f"Teknik ne diyor ? {verdict}",
+        f"Açıklama: {explanation_tr}",
+    ]
+    plain_text_tr = "\n".join(plain_lines)
+
+    return UnifiedCoinAnalysis(
+        symbol=symbol.upper(),
+        timeframe=tf_up,
+        current_price=curr_p,
+        trend_direction=trend_dir,
+        trend_headline_tr=trend_headline,
+        accent_color=accent_color,
+        trend_breakout_label_tr=trend_breakout_label,
+        trend_breakout_value_tr=trend_breakout_val,
+        support_tr=support_tr,
+        strong_support_tr=strong_support_tr,
+        resistance_tr=resistance_tr,
+        strong_resistance_tr=strong_resistance_tr,
+        money_flow_tr=money_flow_tr,
+        liquidation_levels_tr=liquidation_levels_tr,
+        expected_first_liq_tr=expected_first_liq_tr,
+        expected_first_liq_side=expected_side,
+        expected_first_liq_prob_pct=expected_prob,
+        technical_verdict_tr=verdict,
+        explanation_tr=explanation_tr,
+        liquidation_source_tr=liq_source_tr,
+        plain_text_tr=plain_text_tr,
+    )
+
+
+def format_unified_analysis_telegram_html(u: UnifiedCoinAnalysis) -> str:
+    """Formats `UnifiedCoinAnalysis` cleanly in Telegram HTML."""
+    icon = "🟢" if u.trend_direction == "UP" else ("🔴" if u.trend_direction == "DOWN" else "🟡")
+    return "\n".join(
+        [
+            f"{icon} <b>{html.escape(u.trend_headline_tr)}</b>",
+            f"💰 <b>Anlık Fiyat:</b> <code>{html.escape(_fmt_px(u.current_price, u.current_price))}</code>",
+            "━━━━━━━━━━━━",
+            f"📐 <b>{html.escape(u.trend_breakout_label_tr)}:</b> {html.escape(u.trend_breakout_value_tr)}",
+            f"🟢 <b>Destek:</b> {html.escape(u.support_tr)}",
+            f"🛡️ <b>Güçlü Destek:</b> {html.escape(u.strong_support_tr)}",
+            f"🔴 <b>Direnç:</b> {html.escape(u.resistance_tr)}",
+            f"🧱 <b>Güçlü Direnç:</b> {html.escape(u.strong_resistance_tr)}",
+            "━━━━━━━━━━━━",
+            f"💵 <b>Para Giriş / Çıkış:</b> {html.escape(u.money_flow_tr)}",
+            f"🧲 <b>Likidasyon Seviyeleri:</b> {html.escape(u.liquidation_levels_tr)}",
+            f"🎯 <b>Önce Beklenen Likidasyon / Olasılık:</b> {html.escape(u.expected_first_liq_tr)}",
+            "━━━━━━━━━━━━",
+            f"📊 <b>Teknik ne diyor?</b> {html.escape(u.technical_verdict_tr)}",
+            f"📝 <b>Açıklama:</b> {html.escape(u.explanation_tr)}",
+        ]
+    )

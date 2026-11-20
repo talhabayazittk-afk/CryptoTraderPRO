@@ -720,136 +720,30 @@ def format_forecast_telegram_html(
     timeframe: str = "4H",
     current_price: float = 0.0,
     mtf_scores: Optional[Dict[str, float]] = None,
+    df: Optional[Any] = None,
+    order_flow: Optional[Any] = None,
 ) -> str:
     """
-    Formats a MarketForecast into a short, concise, high-signal Turkish HTML message for Telegram.
+    Formats a MarketForecast into a single harmonized, strictly factual Turkish HTML message for Telegram:
+      - Trend direction & trendline breakout level
+      - Support / Strong Support / Resistance / Strong Resistance
+      - Real money inflow/outflow & order-book walls
+      - Real exchange-backed liquidation levels & expected first-sweep liquidation probability
+      - Concise, non-hallucinated technical verdict & explanation
     Does NOT include Futures Stop/TP levels (those belong exclusively to the Futures analysis view).
-    Clearly distinguishes:
-      - Trend Regime: Yükselen Trend / Düşen Trend / Yatay Trend + Swing Structure (HH/HL, LH/LL)
-      - Candlestick Anatomy: Last closed candle structure & volume
-      - Strong ('🛡️ Güçlü Destek' / '🧱 Güçlü Direnç') vs Ordinary ('🟢 Sıradan Destek' / '🔴 Sıradan Direnç')
-      - Beginner-friendly plain roadmap (YTD)
     """
-    def _p(val: Optional[float]) -> str:
-        return _fmt_price(val, current_price)
+    from .local_ai import build_unified_coin_analysis, format_unified_analysis_telegram_html
 
-    tf_up = timeframe.upper()
-    t_state = getattr(fc, "trend_state", "")
-    if t_state == "UPTREND" or (not t_state and fc.score >= 15):
-        trend_title = "📈 YÜKSELEN TREND"
-    elif t_state == "DOWNTREND" or (not t_state and fc.score <= -15):
-        trend_title = "📉 DÜŞEN TREND"
-    else:
-        trend_title = "⚖️ YATAY TREND"
-
-    swing_str = getattr(fc, "swing_structure_tr", "") or "Dengeli Pivot"
-    candle_str = getattr(fc, "candle_anatomy_tr", "") or getattr(fc, "last_pattern_tr", "")
-    if len(candle_str) > 46:
-        candle_str = candle_str[:43].rstrip() + "..."
-
-    # Compact multi-timeframe alignment bar (15M | 1H | 4H | 1D)
-    mtf_line = ""
-    if mtf_scores:
-        parts_mtf = []
-        for tf_k in ("15M", "1H", "4H", "1D"):
-            if tf_k in mtf_scores:
-                sc_k = mtf_scores[tf_k]
-                ic_k = "📈" if sc_k >= 15 else ("📉" if sc_k <= -15 else "⚖️")
-                cell = f"{tf_k}:{ic_k}{sc_k:+.0f}"
-                parts_mtf.append(f"<b>[{cell}]</b>" if tf_k == tf_up else cell)
-        if parts_mtf:
-            mtf_line = "⏱️ " + " | ".join(parts_mtf)
-
-    # Support & Resistance (Strong vs Ordinary clearly separated)
-    sup_str = _p(fc.nearest_support)
-    res_str = _p(fc.nearest_resistance)
-    sup1_tier = getattr(fc, "nearest_support_tier_tr", "🟢 Sıradan Destek")
-    sup1_score = getattr(fc, "nearest_support_score", 0.0)
-    sup1_reason = getattr(fc, "nearest_support_reason_tr", "")
-    res1_tier = getattr(fc, "nearest_resistance_tier_tr", "🔴 Sıradan Direnç")
-    res1_score = getattr(fc, "nearest_resistance_score", 0.0)
-    res1_reason = getattr(fc, "nearest_resistance_reason_tr", "")
-
-    sup1_short_r = (sup1_reason.split(" + ")[0] if sup1_reason else "")[:18]
-    res1_short_r = (res1_reason.split(" + ")[0] if res1_reason else "")[:18]
-    sup1_meta = f" ({sup1_score:.0f}p{f'·{sup1_short_r}' if sup1_short_r else ''})" if sup1_score > 0 else ""
-    res1_meta = f" ({res1_score:.0f}p{f'·{res1_short_r}' if res1_short_r else ''})" if res1_score > 0 else ""
-
-    sup2_inline = ""
-    if len(fc.support_levels) > 1:
-        s2_obj = fc.support_levels[1]
-        s2_ic = "🛡️" if getattr(s2_obj, "is_strong", False) else "🟢"
-        sup2_inline = f" | 2.{s2_ic}<code>{_p(s2_obj.price)}</code>"
-
-    res2_inline = ""
-    if len(fc.resistance_levels) > 1:
-        r2_obj = fc.resistance_levels[1]
-        r2_ic = "🧱" if getattr(r2_obj, "is_strong", False) else "🔴"
-        res2_inline = f" | 2.{r2_ic}<code>{_p(r2_obj.price)}</code>"
-
-    # Breakout / Level Action
-    sr_act_type = getattr(fc, "sr_action_type", "NONE")
-    sr_act_str = getattr(fc, "sr_action_status_tr", "")
-    ema20_val = fc.ema20_price if fc.ema20_price > 0 else current_price
-    up_break_price = fc.nearest_resistance if (fc.nearest_resistance and fc.nearest_resistance > current_price) else max(ema20_val, current_price * 1.008)
-    down_break_price = fc.nearest_support if (fc.nearest_support and fc.nearest_support < current_price) else min(ema20_val, current_price * 0.992)
-
-    if sr_act_type != "NONE" and sr_act_str:
-        short_act = sr_act_str.split(".")[0].strip()
-        if len(short_act) > 56:
-            short_act = short_act[:53].rstrip() + "..."
-        brk_line = f"• 🚨 <b>Durum:</b> {short_act}"
-    elif fc.squeeze_energy_pct >= 68:
-        brk_line = f"• 💥 <b>Sıkışma:</b> %{fc.squeeze_energy_pct:.0f} (±%{fc.expected_breakout_move_pct:.1f} kırılım yakın)"
-    else:
-        brk_line = f"• 📐 <b>Kırılım:</b> ⬆️<code>{_p(up_break_price)}</code> üstü | ⬇️<code>{_p(down_break_price)}</code> altı"
-
-    # Cash Flow & Whales
-    cmf_v = fc.cmf_value
-    net_delta_20 = fc.net_delta_20_usd
-    wh_score = fc.whale_accumulation_score
-    if abs(net_delta_20) >= 1_000_000:
-        delta_fmt_str = f"{net_delta_20 / 1_000_000:+,.1f}M$"
-    elif abs(net_delta_20) >= 1_000:
-        delta_fmt_str = f"{net_delta_20 / 1_000:+,.1f}K$"
-    else:
-        delta_fmt_str = f"{net_delta_20:+,.0f}$"
-
-    mf_ic = "🟢 Giriş" if cmf_v > 0.04 else ("🔴 Çıkış" if cmf_v < -0.04 else "⚪ Dengeli")
-    wh_ic = "🟢 Topluyor" if wh_score >= 60 else ("🔴 Satıyor" if wh_score <= 40 else "⚪ Nötr")
-    poc_str = _p(fc.poc_price)
-    now_hm = time.strftime("%H:%M")
-
-    guidance_str = getattr(fc, "plain_guidance_tr", "") or (
-        f"{sup_str} desteği ile {res_str} direnci arasındaki kırılım yönü belirler (YTD)."
+    unified = build_unified_coin_analysis(
+        symbol=symbol,
+        timeframe=timeframe,
+        df=df,
+        fc=fc,
+        mtf_scores=mtf_scores or {},
+        order_flow=order_flow,
+        current_price=current_price,
     )
-    if len(guidance_str) > 82:
-        guidance_str = guidance_str[:75].rstrip() + " (YTD)."
-
-    lines = [
-        f"📊 <b>{symbol} ({tf_up}) GENEL &amp; YAPISAL ANALİZ</b> <i>({now_hm})</i>",
-        f"💰 <b>Fiyat:</b> <code>{_p(current_price)} USDT</code> | <b>{trend_title} ({fc.score:+.0f})</b>",
-        f"📐 <b>Yapı:</b> {swing_str} | 🕯️ <b>Mum:</b> {candle_str}",
-    ]
-    if mtf_line:
-        lines.append(mtf_line)
-
-    fh_sc = getattr(fc, "flow_health_score", 0.0)
-    fh_short = f"·💧{fh_sc:+.0f}" if abs(fh_sc) >= 1.0 else ""
-    lines.extend(
-        [
-            "━━━━━━━━━━━━",
-            "🧱 <b>DESTEK &amp; DİRENÇ SINIFLANDIRMASI</b>",
-            f"• <b>{sup1_tier}:</b> <code>{sup_str}</code><i>{sup1_meta}</i>{sup2_inline}",
-            f"• <b>{res1_tier}:</b> <code>{res_str}</code><i>{res1_meta}</i>{res2_inline}",
-            brk_line,
-            "━━━━━━━━━━━━",
-            "🐋 <b>PARA AKIŞI &amp; MIKNATIS</b>",
-            f"• <b>Nakit:</b> {mf_ic} (<code>{delta_fmt_str}</code>{fh_short}) | <b>Balina:</b> {wh_ic} ({wh_score:.0f}) | 🧲 <b>POC:</b> <code>{poc_str}</code>",
-            f"🧭 <b>SADE YOL HARİTASI (YTD):</b> {guidance_str}",
-        ]
-    )
-    return "\n".join(lines)
+    return format_unified_analysis_telegram_html(unified)
 
 
 def format_futures_setup_telegram_html(

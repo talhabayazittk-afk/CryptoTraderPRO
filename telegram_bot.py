@@ -220,6 +220,7 @@ import threading
 # Short-lived (45s) in-memory caches so timeframe/tab switching & button taps respond in <0.05s
 _CACHE_LOCK = threading.Lock()
 _BUNDLE_CACHE: Dict[str, Tuple[float, Dict[str, pd.DataFrame], Dict[str, MarketForecast], Dict[str, float], float]] = {}
+_ORDER_FLOW_CACHE: Dict[str, Any] = {}
 _SCAN_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 CACHE_TTL_SEC = 45.0
 
@@ -314,6 +315,7 @@ def _compute_full_coin_bundle(
 
     with _CACHE_LOCK:
         _BUNDLE_CACHE[cache_key] = (now_t, tf_data, tf_forecasts, mtf_scores, current_price)
+        _ORDER_FLOW_CACHE[cache_key] = bundle.order_flow
 
     return df_active, fc_active, tf_forecasts, mtf_scores, current_price
 
@@ -331,12 +333,17 @@ def _analyze_single_coin(
         tf,
         force_refresh=force_refresh,
     )
+    ex_choice = str(load_telegram_state().get("primary_exchange", "binance")).lower()
+    with _CACHE_LOCK:
+        order_flow_cached = _ORDER_FLOW_CACHE.get(f"{ex_choice}:{symbol.upper()}")
     html_text = format_forecast_telegram_html(
         fc_active,
         symbol=symbol,
         timeframe=tf_key,
         current_price=current_price,
         mtf_scores=mtf_scores,
+        df=df_active,
+        order_flow=order_flow_cached,
     )
     kb = build_analysis_inline_keyboard(symbol, tf_key)
     return html_text, kb, df_active, fc_active, current_price

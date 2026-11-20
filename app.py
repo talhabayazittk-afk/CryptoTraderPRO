@@ -1371,6 +1371,8 @@ with col_sel3:
             timeframe=active_tf,
             current_price=last_price,
             mtf_scores={k: tf_forecasts[k].score for k in ("15M", "1H", "4H", "1D") if k in tf_forecasts},
+            df=df_active,
+            order_flow=order_flow,
         )
         kb_an = build_analysis_inline_keyboard(active_symbol, active_tf)
         png_bytes = generate_telegram_chart_png(

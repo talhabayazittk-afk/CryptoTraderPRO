@@ -238,11 +238,14 @@ class TestCryptoAnalysisArchitecture(unittest.TestCase):
             current_price=curr_p,
             mtf_scores={"15M": -20.0, "1H": fc.score, "4H": -35.0, "1D": -30.0},
         )
-        # Concise summary checks & no Futures TP/Stop in general analysis
-        self.assertLess(len(tg_msg), 950)
-        self.assertIn("DESTEK &amp; DİRENÇ SINIFLANDIRMASI", tg_msg)
-        self.assertIn("PARA AKIŞI &amp; MIKNATIS", tg_msg)
-        self.assertIn("SADE YOL HARİTASI (YTD)", tg_msg)
+        # Unified harmonized summary checks & no Futures TP/Stop in general analysis
+        self.assertIn("Destek:", tg_msg)
+        self.assertIn("Güçlü Destek:", tg_msg)
+        self.assertIn("Direnç:", tg_msg)
+        self.assertIn("Güçlü Direnç:", tg_msg)
+        self.assertIn("Para Giriş / Çıkış:", tg_msg)
+        self.assertIn("Likidasyon Seviyeleri:", tg_msg)
+        self.assertIn("Teknik ne diyor?", tg_msg)
         self.assertNotIn("TP1:", tg_msg)
         self.assertNotIn("Zarar-Kes (Stop):", tg_msg)
 

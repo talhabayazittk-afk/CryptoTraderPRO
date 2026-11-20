@@ -810,8 +810,9 @@ def build_unified_coin_analysis(
     timeframe: str,
     df: Any,
     fc: MarketForecast,
-    mtf_scores: Dict[str, float],
+    mtf_scores: Optional[Dict[str, float]] = None,
     order_flow: Optional[OrderFlowIntel] = None,
+    current_price: float = 0.0,
 ) -> UnifiedCoinAnalysis:
     """
     Produces a single, harmonized, strictly factual Turkish technical + cash-flow + liquidation analysis
@@ -820,18 +821,21 @@ def build_unified_coin_analysis(
     tf_up = timeframe.upper()
     tf_disp = tf_up.lower()
     base_coin = symbol.split("/")[0].upper()
+    mtf_scores = mtf_scores or {}
     last_row = df.iloc[-1] if (df is not None and len(df) > 0) else {}
     curr_p = float(last_row.get("close", 0.0)) if hasattr(last_row, "get") else 0.0
+    if curr_p <= 0 and current_price > 0:
+        curr_p = float(current_price)
     if curr_p <= 0 and fc.nearest_support and fc.nearest_resistance:
         curr_p = 0.5 * (fc.nearest_support + fc.nearest_resistance)
 
-    ema20 = float(last_row.get("ema_20", curr_p)) if hasattr(last_row, "get") else curr_p
+    ema20 = float(last_row.get("ema_20", getattr(fc, "ema20_price", curr_p) or curr_p)) if hasattr(last_row, "get") else (getattr(fc, "ema20_price", curr_p) or curr_p)
     ema50 = float(last_row.get("ema_50", curr_p)) if hasattr(last_row, "get") else curr_p
     ema200 = float(last_row.get("ema_200", 0.0)) if hasattr(last_row, "get") else 0.0
     rsi14 = float(last_row.get("rsi", 50.0)) if hasattr(last_row, "get") else 50.0
     adx14 = float(last_row.get("adx", 20.0)) if hasattr(last_row, "get") else 20.0
     macd_hist = float(last_row.get("macd_hist", 0.0)) if hasattr(last_row, "get") else 0.0
-    cmf_v = float(last_row.get("cmf", 0.0)) if hasattr(last_row, "get") else 0.0
+    cmf_v = float(last_row.get("cmf", getattr(fc, "cmf_value", 0.0))) if hasattr(last_row, "get") else float(getattr(fc, "cmf_value", 0.0))
 
     # 1. Trend Direction (strictly anchored to score, trend_score, EMA alignment)
     if fc.score >= 15.0 or (fc.trend_score >= 18.0 and curr_p > ema50 and fc.score >= 5.0):
